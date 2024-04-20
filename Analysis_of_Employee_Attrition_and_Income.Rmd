@@ -1,0 +1,2420 @@
+---
+title: "Analysis of Employee Attrition and Income"
+author: "Kristin Henderson"
+date: "Spring 2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Introduction
+<br>
+To address the challenge of retaining talented employees, the leadership team of Frito Lay have engaged DDS Analytics to conduct an in-depth analysis aimed at uncovering the underlying factors behind employee turnover within their organization. This study, leveraging data from 870 employees across 36 distinct variables, is designed to yield actionable insights to inform decision-making processes. By employing a combination of visualizations, statistical methodologies, and the creation of predictive models, the objective is to provide strategic guidance and practical tools to enhance future strategies and organizational policies.
+<br>
+<br>
+**Presentation**
+<br>
+View the video presentation of this analysis: https://.
+<br>
+<br>
+**This imports necessary libraries.**
+<br>
+```{r libraries, results='hide', message=FALSE}
+library(RCurl)
+library(tidyverse)
+library(ggplot2)
+library(DataExplorer)
+library(Hmisc) #rcorr(), generates a correlation matrix
+library(corrplot) #to plot the correlation matrix
+library(gridExtra) #to arrange plots in a grid
+library(RColorBrewer)
+library(caret) #ConfusionMatrix()
+library(e1071) #naiveBayes()
+library(class) #knn
+library(combinat)
+library(patchwork)
+library(GGally)
+library(kableExtra) #kable() tables
+library(pander) #pander() tables
+library(dplyr) #loading this after Hmisc because of conflict in summarize? can use summarise instead
+```
+<br>
+
+### Objective 1: Identify the top three factors that lead to attrition.  
+<br>
+**I import the primary data set from the cloud as `cs2`. Then, I convert the numerical variables that are Likert scale responses to factors, creating a new data frame, `cs2_conv`.**
+<br>
+```{r importData, comment = ""}
+# import data: CaseStudy2-data.csv from AWS S3 msdsds6306 bucket
+
+cs2 = read.table(textConnection(getURL(
+  "https://s3.us-east-2.amazonaws.com/msdsds6306/CaseStudy2-data.csv"
+)), sep=",", header=TRUE, stringsAsFactors = TRUE)
+
+# save a copy of the data
+# write.csv(cs2, file = "data/CaseStudy2-data.csv", row.names = FALSE)
+
+# get a sense of the data
+str(cs2)
+df_summary = summary(cs2)
+df_summary
+
+# convert numerical ranking variables to factors
+numVars_to_fact = c("Education", "EnvironmentSatisfaction",
+                    "JobInvolvement", "JobLevel", "JobSatisfaction",
+                    "PerformanceRating", "RelationshipSatisfaction",
+                    "StockOptionLevel", "WorkLifeBalance")
+cs2_conv = cs2 %>%
+  mutate(across(all_of(numVars_to_fact), as.factor))
+# check the conversion
+# str(cs2_conv)
+
+# get the proportion of attrition
+summary(cs2_conv$Attrition)
+
+NoAttProb = summary(cs2_conv$Attrition)["No"] / sum(summary(cs2_conv$Attrition))
+NoAttProb
+AttProb = summary(cs2_conv$Attrition)["Yes"] / sum(summary(cs2_conv$Attrition))
+AttProb
+
+```
+<br>
+<br>
+**For the exploratory data analysis (EDA), first I visualize the data. I loop through and plot nearly all the numerical variables in histograms and frequency polygons by density grouped by attrition category. I also loop through each categorical variable, find the proportion of each level within each attrition category and plot them as bar charts.**
+<br>
+```{r univariatePlots, message = FALSE}
+# plot the distributions of numerical variables with respect to attrition group
+
+# select all variables except ID, EmployeeCount (all=1), and StandardHours (all=80))
+cs2_conv_subset = cs2_conv %>% select(-ID, -EmployeeCount, -StandardHours)
+# check the modification
+# str(cs2_conv_subset)
+
+# filter the numerical variables
+numVars = sapply(cs2_conv_subset, is.numeric)
+cs2_numerical = cs2_conv_subset[, numVars] #this does not include integers that were converted to factors
+# check the result
+# str(cs2_numerical)
+
+# function to calculate binwidth (by Freedman-Diaconis rule, Bin Width=2*IQR/(cuberoot(n)))
+# and flexibly set a binwidth for each variable
+calculate_binwidth = function(data) {
+  IQR = quantile(data, 0.75) - quantile(data, 0.25)
+  n = length(data)
+  bw = 2 * IQR / (n^(1/3))
+  return(bw)
+}
+
+# iterate over numerical variables and create plots
+dist_plots = list()
+for (col in names(cs2_numerical)) {
+  # calculate binwidth for current variable
+  bw = calculate_binwidth(cs2_conv[[col]])
+  
+  # create a histogram with density not frequency for each variable
+  hist_plot = cs2_conv %>%
+    ggplot(aes(x = .data[[col]], y = after_stat(density), fill = Attrition)) +
+    geom_histogram(binwidth = bw) +
+    facet_wrap(~Attrition)
+    labs(title = paste("Histogram of", col))
+
+  # save the histogram plot
+  # ggsave(filename = paste0("plots/EDA/", col, "_histogram.png"), plot = hist_plot, device = "png")
+  
+  # create a frequency polygon plot for each variable
+  freqpoly_plot = cs2_conv %>%
+    ggplot(aes(x = .data[[col]], y = after_stat(density), color = Attrition)) +
+    geom_freqpoly(binwidth = bw) +
+    labs(title = paste("Frequency Polygon of", col))
+  
+  # save the frequency polygon plot
+  # ggsave(filename = paste0("plots/EDA/", col, "_freqpoly.png"), plot = freqpoly_plot, device = "png")
+
+  dist_plots[[col]] = list(hist_plot, freqpoly_plot)
+}
+
+# display plots
+for (col in names(cs2_numerical)) {
+  print(dist_plots[[col]][[1]]) #displays histogram
+  print(dist_plots[[col]][[2]]) #displays frequency polygon
+}
+
+
+# make bar charts to visualize categorical variables with respect to attrition group
+# filter categorical variables (factors)
+cs2_categorical = cs2_conv %>%
+  select(where(is.factor) & -Over18) #Over18(all=Y)
+# check the result
+# str(cs2_categorical)
+
+# iterate over categorical variables and create bar plots
+bar_plots = list()
+for (col in names(cs2_categorical)) {
+  if (col != "Attrition") { #check if the column is not "Attrition"
+    # calculate proportions of each category within each level of Attrition
+    prop_cat_data = cs2_categorical %>%
+      group_by(Attrition = cs2_conv$Attrition, .data[[col]]) %>%
+      dplyr::summarize(count = n(), .groups = "drop") %>% #this gets rid of the warning message about grouping
+      group_by(Attrition) %>%
+      mutate(proportion = count / sum(count))
+    
+    bar_plot = prop_cat_data %>%
+      ggplot(aes(x = .data[[col]], y = proportion, fill = Attrition)) +
+      geom_bar(position = "dodge", stat = "identity") +
+      labs(title = paste("Bar Chart of", col)) + 
+      coord_flip()
+    
+    # save the bar plot
+    # ggsave(filename = paste0("plots/EDA/", col, "_barplot.png"), plot = bar_plot, device = "png")
+    
+    bar_plots[[col]] = bar_plot
+  }
+}
+
+# display plots if they exist (there is no plot for attrition)
+for (col in names(cs2_categorical)) {
+  if (!is.null(bar_plots[[col]]))
+    print(bar_plots[[col]])
+}
+
+```
+<br>
+<br>
+Many of the numerical features have right-skewed distributions, e.g. salary, and the variables that are related to years working.  
+<br>
+With the plots above, I look for features that may have higher attrition.  
+<br>
+*Numerical* features with higher attrition may include the following.  
+
+  * age (under ~32)  
+  * distance from home (above ~13)  
+  * employee number (There are three peaks.)  
+  * num companies worked (higher above ~5, a bit higher ~1)  
+  * percent salary hike?  
+  * total working years (higher below 8 and bump at ~40 for retirement?)  
+  * training time?  
+  * years at company (higher below ~2 and bump at ~40 for retirement?)  
+  * years in current role (higher below ~2)  
+  * years with current manager (higher below ~1)  
+  * hourly rate? (seems flat depending on how you bin it)  
+  * daily rate (low-mid, ~250-650)  
+  * monthly rate? (more or less flat depending on how you bin it)  
+  * monthly income (much higher below ~3000)   
+<br>
+
+*Categorical* features with higher attrition may include the following.  
+
+  * business travel (higher with frequent)  
+  * department (higher in sales)  
+  * education (slightly higher with lower education, 1-3)  
+  * education field (higher in tech degree and marketing)  
+  * environmental satisfaction (higher in 1, lower in 2-4)  
+  * gender (slightly higher in males)  
+  * job involvement (higher attrition 1-2, lower 3-4)  
+  * job level (much higher in 1, lower in 2-5)  
+  * job role (higher in sales rep, technician and scientist)  
+  * job satisfaction (higher in 1-3, lower in 4)  
+  * marital status (much higher in single)  
+  * over time (much higher with yes)  
+  * relationship satisfaction (higher in 1, lower in 3)  
+  * stock option level (higher with 0)  
+  * work life balance (higher in 1)  
+<br>
+
+Something odd, performance rating doesn't seem to have much effect, but attrition is higher in 4.  
+<br>
+These factors could be correlated with age and higher skill: age, education, environmental satisfaction(?), job involvement(?), job level, job satisfaction(?), marital status, monthly income, overtime, stock option level, total working years, years at company, years in current role, years with current manager.  
+<br>
+<br>
+**The next step of my EDA is to check for missing values before proceeding with further analysis.**
+<br>
+```{r missingValues, comment = ""}
+
+# are there missing values
+missing_count = sum(is.na(cs2_conv) | cs2_conv == "")
+writeLines(sprintf("There are %d missing values in the dataset.", missing_count))
+
+```
+<br>
+The data set appears to be complete.  
+<br>
+<br>
+**This function generates a report to facilitate EDA. It is good to know about and look over for ideas, though perhaps not as useful as my step-by-step analysis.**
+<br>
+```{r DataExplorer, eval = FALSE}
+
+create_report(cs2_conv, y = "Attrition")
+
+```
+<br>
+<br>
+**For the numerical variables, I generate a matrix of correlation coefficients and plot them. There is also a function to generate a table of correlation and p-values, but only the first few rows are displayed for the sake of space. I find the matrix to be sufficient.**
+<br>
+```{r correlationMatrix, collapse = TRUE}
+
+# compute correlation matrix and p-values
+cor_mat = rcorr(as.matrix(cs2_numerical))
+
+# This function makes a table of each variable combination with the correlation coefficient and p-value
+# ++++++++++++++++++++++++++++
+# flattenCorrMatrix
+# ++++++++++++++++++++++++++++
+# cormat : matrix of the correlation coefficients
+# pmat : matrix of the correlation p-values
+flattenCorrMatrix = function(cormat, pmat) {
+  ut <- upper.tri(cormat)
+  data.frame(
+    row = rownames(cormat)[row(cormat)[ut]],
+    column = rownames(cormat)[col(cormat)[ut]],
+    cor  =(cormat)[ut],
+    p = pmat[ut]
+    )
+}
+
+# call the function with extracted correlation and p-values
+corrTable = flattenCorrMatrix(cor_mat$r, cor_mat$P)
+kable(head(corrTable), caption = "correlation coefficients") %>% kable_styling(full_width = FALSE, position = "left")
+
+# plot the correlations using corrplot
+corrplot(cor_mat$r, type = "upper", order = "hclust", insig = "blank")
+# If I include the p.mat argument I get an error.
+# I think because pairs of the same variable create an NA.
+
+```
+<br>
+From this matrix, there is evidence of correlation between some numerical variables, including total working years with these below:  
+
+  * years at company  
+  * years in current role  
+  * years with current manager   
+  * (years since last promotion)  
+  * monthly income  
+<br>
+
+
+**Next in the EDA, I look at each numerical variable for statistically significant evidence that the mean value of that variable differs between the populations of employees that stay or go. I perform t-tests for each numerical feature with the null hypothesis that the means of the attrition groups are equal.**
+<br>
+```{r prelim_TTests, comment = ""}
+
+# extract numerical column names from cs2_numerical
+numerical_columns = colnames(cs2_numerical)
+
+# initialize an empty list to store t-test results
+t_test_results = list()
+
+# initialize an empty dataframe to store summary statistics
+summary_table = data.frame(variable = character(), 
+                            mean_Attrition_Yes = numeric(), 
+                            mean_Attrition_No = numeric(),
+                            p_value = numeric(),
+                            stringsAsFactors = FALSE)
+
+# initialize empty lists to store variable names with p-value < 0.05 or < 0.001
+significant_variables = list() #p-value < 0.05
+super_sig_variables = list() # p-value < 0.001
+
+# loop through each numerical variable
+for (col in numerical_columns) {
+  # get data for the current column
+  data_col = cs2_conv[[col]]
+    
+  # run a t-test
+  t_test_result = t.test(data_col ~ Attrition, data = cs2_conv)
+      
+  # store t-test result in the list
+  t_test_results[[col]] = t_test_result
+      
+  # extract relevant information and add to summary table
+  summary_table = summary_table %>%
+    add_row(variable = col,
+      mean_Attrition_Yes = mean(data_col[cs2_conv$Attrition == "Yes"], na.rm = TRUE),
+      mean_Attrition_No = mean(data_col[cs2_conv$Attrition == "No"], na.rm = TRUE),
+      p_value = t_test_result$p.value)
+      
+  # check if p-value is less than 0.05
+  if (t_test_result$p.value < 0.05) {
+  significant_variables[[col]] = t_test_result
+  }
+  # check if p-value is less than 0.001
+  if (t_test_result$p.value < 0.001) {
+  super_sig_variables[[col]] = t_test_result
+  }
+}
+
+# print summary table
+kable(summary_table, caption = "t-test results") %>% kable_styling(full_width = FALSE, position = "left")
+
+# print list of variables with p-value < 0.05
+significant_variable_names = names(significant_variables)
+cat("\nVariables with p-value < 0.05:\n", paste(significant_variable_names, collapse = ", "))
+
+# print list of variables with p-value < 0.001
+super_sig_variable_names = names(super_sig_variables)
+cat("\nVariables with p-value < 0.001:\n", paste(super_sig_variable_names, collapse = ", "))
+
+# print full t-test results for variables with p-value < 0.001
+cat("\nT-test results for variables with p-value < 0.001:\n")
+for (col in super_sig_variable_names) {
+  cat("Variable:", col, "\n")
+  print(super_sig_variables[[col]])
+  cat("\n")
+}
+
+```
+<br>
+This provides additional evidence of numerical variables that likely influence attrition to narrow the pool of important features in the data set.  
+<br>
+Variables with p-value < 0.05:  Age, DistanceFromHome, MonthlyIncome, TotalWorkingYears, YearsAtCompany, YearsInCurrentRole, YearsWithCurrManager  
+(The last 5 are highly correlated as I saw above.)  
+<br>
+Variables with p-value < 0.001:  Age, MonthlyIncome, TotalWorkingYears, YearsAtCompany, YearsInCurrentRole, YearsWithCurrManager  
+<br>
+<br>
+**To gather statistical evidence of categorical variables associated with attrition, I perform chi-square tests for each categorical feature with the null hypothesis that the proportion of attrition is the same across all categories (feature levels).**
+<br>
+```{r prelim_ChiSqTests, warning = FALSE, comment = ""}
+
+# extract categorical column names from cs2_categorical, excluding Attrition
+categorical_columns = colnames(cs2_categorical)
+categorical_columns = categorical_columns[categorical_columns != "Attrition"]
+
+# initialize an empty list to store chi-square test results
+chisq_test_results = list()
+
+# initialize an empty dataframe to store summary statistics
+summary_table2 = data.frame(variable = character(), 
+                            p_value = numeric(),
+                            stringsAsFactors = FALSE)
+
+# initialize empty lists to store variable names with p-value < 0.05 or < 0.001
+significant_variables2 = list()
+super_sig_variables2 = list()
+
+# loop through each categorical variable
+for (col in categorical_columns) {
+  # create a contingency table for the chi-square test
+  contingency_table = table(cs2_conv[[col]], cs2_conv$Attrition)
+  # print(contingency_table)
+  
+  # run a chi-square test
+  chisq_test_result = chisq.test(contingency_table)
+      
+  # store chi-square test result in the list
+  chisq_test_results[[col]] = chisq_test_result
+      
+  # extract relevant information and add to summary table
+  summary_table2 = summary_table2 %>%
+    add_row(variable = col,
+      p_value = chisq_test_result$p.value)
+      
+  # check if p-value is less than 0.05
+  if (chisq_test_result$p.value < 0.05) {
+  significant_variables2[[col]] = chisq_test_result
+  }
+  # check if p-value is less than 0.001
+  if (chisq_test_result$p.value < 0.001) {
+  super_sig_variables2[[col]] = chisq_test_result
+  }
+}
+
+# print summary table
+kable(summary_table2, caption = "chi-square test results") %>% kable_styling(full_width = FALSE, position = "left")
+
+# print list of variables with p-value < 0.05
+significant_variable_names2 = names(significant_variables2)
+cat("\nVariables with p-value < 0.05:\n", paste(significant_variable_names2, collapse = ", "))
+
+# print list of variables with p-value < 0.001
+super_sig_variable_names2 = names(super_sig_variables2)
+cat("\nVariables with p-value < 0.001:\n", paste(super_sig_variable_names2, collapse = ", "))
+
+# print full chi-square test results for variables with p-value < 0.001
+cat("\nChi-square test results for variables with p-value < 0.001:\n")
+for (col in super_sig_variable_names2) {
+  cat("Variable:", col, "\n")
+  print(super_sig_variables2[[col]])
+  cat("\n")
+}
+
+```
+<br>
+Although, the assumptions of a chi-square test may be violated here, a deeper knowledge of the test would be helpful, and use of alternative tests might be more appropriate, this at least provides additional evidence of categorical variables that likely influence attrition, facilitating a narrower pool of variables to consider.  
+<br>
+Variables with p-value < 0.05:  BusinessTravel, Department, EnvironmentSatisfaction, JobInvolvement, JobLevel, JobRole, JobSatisfaction, MaritalStatus, OverTime, StockOptionLevel, WorkLifeBalance  
+<br>
+Variables with p-value < 0.001:  JobInvolvement, JobLevel, JobRole, MaritalStatus, OverTime, StockOptionLevel  
+<br>
+<br>
+**To look at co-variation among numerical variables that seem likely to influence attrition, I make scatter plots of all combinations of those with highly significant t-test results.**
+<br>
+```{r covariation_num, message = FALSE}
+# look at co-variation among numerical variables
+
+# function to create scatter plots for each pair of variables
+make_scatterplot = function(var1, var2) {
+  cs2_conv %>% 
+    ggplot(aes(x = .data[[var1]], y = .data[[var2]], color = Attrition)) +
+    geom_point(alpha = 0.5, position = "jitter") +
+    geom_smooth() +
+    labs(title = paste(var1, "vs", var2))
+}
+
+# loop through each variable
+for (i in 1:(length(super_sig_variable_names) - 1)) {
+  var1 = super_sig_variable_names[i]
+  
+  # plot var1 with every other variable that comes after it in the list
+  for (j in (i + 1):length(super_sig_variable_names)) {
+    var2 = super_sig_variable_names[j]
+    scatter = make_scatterplot(var1, var2)
+    
+    # display and save the individual plots
+    print(scatter) # using print() so it's easier to find where I call the plot
+    filename = paste0("plots/EDA/scatter_", var1, "_vs_", var2, ".png")
+    # ggsave(filename, plot = scatter, device = "png")
+  }
+}
+
+```
+<br>
+<br>
+
+**To do the same for combinations of numerical and categorical variables, I make boxplots of all combinations of those with highly significant t-test and chi-square test results.**
+<br>
+```{r covariation_c_n}
+# look at co-variation between numerical and categorical variables
+
+# function to create boxplots for each pair of variables
+make_boxplot = function(catvar, numvar) {
+  cs2_conv %>% group_by(Attrition) %>% 
+    ggplot(aes(x = .data[[catvar]], y = .data[[numvar]], fill = Attrition)) +
+    geom_boxplot() +
+    coord_flip() +
+    labs(title = paste(catvar, "vs", numvar))
+}
+
+# loop through each variable
+for (i in 1:(length(super_sig_variable_names2))) {
+  catvar = super_sig_variable_names2[i]
+  
+  # plot catvar with every numvar
+  for (j in 1:length(super_sig_variable_names)) {
+    numvar = super_sig_variable_names[j]
+    boxplt = make_boxplot(catvar, numvar)
+    
+    # display and save the individual plots
+    # I tried to display them in a grid in the interest of space, but they are just too small.
+    print(boxplt)
+    filename = paste0("plots/EDA/boxplt_", catvar, "_vs_", numvar, ".png")
+    # ggsave(filename, plot = boxplt, device = "png")
+  }
+}
+
+```
+<br>
+<br>
+
+**To do the same for combinations of categorical variables, I make bar charts of all combinations of those with highly significant chi-square test results.**
+<br>
+```{r covariation_cat, message = FALSE}
+# look at co-variation among categorical variables
+
+# It probably is easier to see relationships if I were to calculate proportions a different way to normalize the data.
+# Currently, proportions are calculated like this. For each attrition group, and each level of variable 1, the count of each level of variable 2 (the fill variable) is divided by the sum of the total count for all levels of that variable (within the attrition and variable 1 level).
+
+make_barchart = function(var1, var2) {
+  cs2_conv %>% 
+    group_by(Attrition, .data[[var1]], .data[[var2]]) %>%
+    dplyr::summarize(n = n(), .groups = 'drop') %>%  #count occurrences within each group
+    group_by(Attrition, .data[[var1]]) %>%  # group by Attrition and var1
+    mutate(prop = n / sum(n)) %>% #calculate proportion within each group
+    ggplot(aes(y = .data[[var1]], x = prop, fill = .data[[var2]])) +  #use prop as fill
+    geom_bar(stat = "identity", position = position_dodge2(preserve = "single")) +
+    facet_wrap(~Attrition, labeller = labeller(Attrition = c("No" = "No Attrition", "Yes" = "Yes Attrition"))) +
+    labs(title = paste(var1, "vs", var2),
+         y = var1,
+         x = paste0("Proportion of ", var2, " within Attrition and ", var1, " level"),
+         fill = var2) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    scale_fill_brewer(palette = "Set1")
+}
+
+# loop through each variable
+for (i in 1:(length(super_sig_variable_names2) - 1)) {
+  var1 = super_sig_variable_names2[i]
+    
+  for (j in (i + 1):length(super_sig_variable_names2)) {
+    var2 = super_sig_variable_names2[j]
+    barplt = make_barchart(var1, var2)
+    
+    # display and save the individual plots
+    print(barplt)
+    filename = paste0("plots/EDA/barplt_", var1, "_vs_", var2, ".png")
+    # ggsave(filename, plot = barplt, device = "png")
+  }
+}
+
+```
+<br>
+<br>
+
+**Observations from co-variation plots**  
+<br>
+**Job level**  
+
+  * Trends:  
+    - There is a positive trend between job level and several other variables:  age, monthly income, total working years, years at company, years in current role and years with current manager.  
+  * Differences:  
+    -	Job level 4: age and monthly income look like they may contribute to attrition specifically in this job level  
+    -	Job level 5: years at company and years in current role may contribute to attrition in this job level. (This suggests perhaps retirement is a factor, although total working years doesn’t show the same variation.)  
+
+**Marital Status**  
+
+  * Trends:  
+    - Singles that leave are lower in median age, have fewer total working years, years at company and years in current role than other groups.  
+    - Otherwise, age is similar in marital status.  
+    - All marital status levels have higher attrition with overtime, though this trend seems more pronounced in singles.  
+  * Observations:  
+    - Singles fall entirely within stock option level 0.  
+
+**Overtime and Stock Option**  
+
+  * Trends:  
+    - Across age, monthly income, total working years, years at company, years in current role and years with current manager, trends between attrition categories appear similar in overtime and stock option levels.  
+    - Stock option 2 may have a different trend with median age and years in current role being higher among those that leave.  
+  * Observations:  
+    - There are interesting trends in overtime and stock options between job roles.  
+
+**Monthly income**  
+
+  * Trends:  
+    - Monthly income is positively associated with total working years with little difference in attrition groups.  
+    - There a positive association between monthly income and age.  
+  * Differences:  
+    - There seems to be higher attrition in older employees with lower incomes.  
+    - Higher income earners tend to leave if they have been with the company > 10 years or in their current role or with their current manager > ~7 years.  
+
+Some additional ideas:  
+
+  * It might be a good idea to derive a variable, percent of working years at a company from total working years and years at company. This may offset the confound of age.  
+<br>
+<br>
+
+**As there is high correlation between total working years, years at company, years in current role and years with current manager, I want to see if deriving one variable from two of these, might help offset the correlation with age and extract possibly more meaningful information with the use of fewer variables.**
+<br>
+```{r derivedVariables, message = FALSE, comment = ""}
+
+cs2_conv2 = cs2_conv %>% 
+  mutate(
+    PercentWrkYrsAtCompany = ifelse(TotalWorkingYears == 0, 0,
+                                    round(YearsAtCompany / TotalWorkingYears * 100, 2)),
+    PercentYrs_wManager = ifelse(TotalWorkingYears == 0, 0,
+                                 round(YearsWithCurrManager / TotalWorkingYears * 100, 2)),
+    PercentYrs_inRole = ifelse(TotalWorkingYears == 0, 0,
+                               round(YearsInCurrentRole / TotalWorkingYears * 100, 2)),
+    PercentYrs_inRoleAtComp = ifelse(YearsAtCompany == 0, 0,
+                               round(YearsInCurrentRole / YearsAtCompany * 100, 2))
+  )
+# str(cs2_conv2)
+# summary(cs2_conv2)
+
+# plot these derived variables with other variables that seem relevant and alone to see the distributions
+cs2_conv2 %>% ggplot(aes(x = Age, y = PercentWrkYrsAtCompany, color = Attrition)) +
+  geom_point(alpha = 0.5, position = "jitter") + geom_smooth()
+cs2_conv2 %>% ggplot(aes(x = MonthlyIncome, y = PercentWrkYrsAtCompany, color = Attrition)) +
+  geom_point(alpha = 0.5, position = "jitter") + geom_smooth()
+
+cs2_conv2 %>% ggplot(aes(x = Age, y = PercentYrs_inRoleAtComp, color = Attrition)) +
+  geom_point(alpha = 0.5, position = "jitter") + geom_smooth()
+cs2_conv2 %>% ggplot(aes(x = MonthlyIncome, y = PercentYrs_inRoleAtComp, color = Attrition)) +
+  geom_point(alpha = 0.5, position = "jitter") + geom_smooth()
+
+cs2_conv2 %>% ggplot(aes(x = MaritalStatus, y = PercentWrkYrsAtCompany, fill = Attrition)) +
+  geom_boxplot(position = "dodge")
+cs2_conv2 %>% ggplot(aes(x = JobLevel, y = PercentWrkYrsAtCompany, fill = Attrition)) +
+  geom_boxplot(position = "dodge")
+
+cs2_conv2 %>% ggplot(aes(x = MaritalStatus, y = PercentYrs_inRoleAtComp, fill = Attrition)) +
+  geom_boxplot(position = "dodge")
+cs2_conv2 %>% ggplot(aes(x = JobLevel, y = PercentYrs_inRoleAtComp, fill = Attrition)) +
+  geom_boxplot(position = "dodge")
+
+cs2_conv2 %>% ggplot(aes(x = PercentWrkYrsAtCompany, after_stat(density), fill = Attrition)) +
+  geom_histogram(binwidth = 10) + facet_wrap(~Attrition)
+
+cs2_conv2 %>% ggplot(aes(x = PercentYrs_inRoleAtComp, y = after_stat(density), fill = Attrition)) +
+  geom_histogram(binwidth = 10) + facet_wrap(~Attrition)
+
+# run t-tests to check for possible differences
+t.test(PercentWrkYrsAtCompany ~ Attrition, data = cs2_conv2)
+t.test(PercentYrs_wManager ~ Attrition, data = cs2_conv2)
+t.test(PercentYrs_inRole ~ Attrition, data = cs2_conv2)
+t.test(PercentYrs_inRoleAtComp ~ Attrition, data = cs2_conv2)
+
+```
+<br>
+Based on the plots and t-test results, percent years in role at company (derived from years in role divided by years at company), seems like the most potentially useful of these derived variables.  
+<br>
+<br>
+**I further explore the usefulness of the percent years in role at company by plotting combinations of percent years in role at company, monthly income, age, and job level.**
+<br>
+```{r message = FALSE, collapse = TRUE}
+
+cs2_conv2 %>% ggplot(aes(x = PercentYrs_inRoleAtComp, y = MonthlyIncome, color = JobLevel)) +
+  geom_point(alpha = 0.5, position = "jitter") + geom_smooth()
+
+cs2_conv2 %>% ggplot(aes(x = PercentYrs_inRoleAtComp, y = Age, color = JobLevel)) +
+  geom_point(alpha = 0.5, position = "jitter") + geom_smooth()
+
+cs2_conv2 %>% ggplot(aes(x = MonthlyIncome, y = Age, color = JobLevel)) +
+  geom_point(alpha = 0.5, position = "jitter") + geom_smooth()
+
+```
+<br>
+
+Monthly income is a good predictor of job level (or vice versa) no matter the percent years in role at the company. Age is not as good (though there is some predictability). There is a much wider distribution of ages the lower the income, particularly under 5000.  
+<br>
+Job level seems like a powerful predictor.  
+<br>
+<br>
+**So far, the visual and statistical evidence and my best guess for top features leading to attrition are Job Level, Marital Status, Monthly Income and Overtime. To confirm this and/or narrow my list to 3, I want to use the list of 12 features that seem like they have the greatest differences between attrition categories. I generate all the unique combinations of 3 variables. Then using the loop in this code, I use each combination to build a Naive Bayes model to predict attrition, and rank them by how well each combination performed.**
+<br>
+```{r modelTop3}
+
+modelIdx = c(2,15,16,17,19,20,24,29,30,33,34,36) #indexes of predicted top features
+# these are the indexes for Age, JobInvolvement, JobLevel, JobRole, MaritalStatus, MonthlyIncome, OverTime, StockOptionLevel, TotalWorkingYears, YearsAtCompany, YearsInCurrentRole, YearsWithCurrManager
+
+# initialize an empty data frame to store results
+results = data.frame(Index1 = integer(), Index2 = integer(), Index3 = integer(), Sensitivity = numeric(), Specificity = numeric(), Accuracy = numeric(), stringsAsFactors = FALSE)
+
+# number of different splits
+iters = 50
+
+# 70-30 train/test split
+splitPerc = 0.7
+
+# generate all combinations of 3 indexes
+index_combinations = combinat::combn(modelIdx, 3)
+
+# loop through each combination of 3 indexes
+for (i in 1:ncol(index_combinations)) {
+  index_set = index_combinations[, i]
+
+  # create holders for the sensitivity, specificity, and accuracy for each iteration
+  masterSens = numeric(iters)
+  masterSpec = numeric(iters)
+  masterAcc = numeric(iters)
+
+  # iterate over the specified number of iterations
+  for (j in 1:iters) {
+    set.seed(j)
+
+    # sample 70% for training
+    trainIdx = sample(1:dim(cs2_conv2)[1], round(splitPerc * dim(cs2_conv2)[1]))
+    # select the rows for training
+    AttritionTrn = cs2_conv2[trainIdx, ]
+    # select the remaining rows for testing
+    AttritionTst = cs2_conv2[-trainIdx, ]
+
+    # temporarily set the current indexes for modeling
+    temp_modelIdx = index_set
+
+    # train the model
+    modelNB = naiveBayes(AttritionTrn[, temp_modelIdx], AttritionTrn$Attrition, laplace = 1)
+
+    # predict using the model
+    preds = predict(modelNB, AttritionTst[, temp_modelIdx])
+
+    # make a confusion matrix
+    CM = confusionMatrix(table(preds, AttritionTst$Attrition))
+
+    # store sensitivity, specificity, and accuracy
+    masterSens[j] = CM$byClass["Sensitivity"]
+    masterSpec[j] = CM$byClass["Specificity"]
+    masterAcc[j] = CM$overall["Accuracy"]
+  }
+
+  # calculate average sensitivity, specificity, and accuracy
+  avg_sensitivity = mean(masterSens)
+  avg_specificity = mean(masterSpec)
+  avg_accuracy = mean(masterAcc)
+
+  # store the results including the three indexes
+  results = rbind(results, list(Index1 = index_set[1], Index2 = index_set[2], Index3 = index_set[3], Sensitivity = avg_sensitivity, Specificity = avg_specificity, Accuracy = avg_accuracy))
+}
+
+# output the results
+results = results %>% arrange(-Specificity)
+kable(head(results, 10), caption = "3 variable combos to predict attrition") %>% kable_styling(full_width = FALSE, position = "left")
+
+```
+<br>
+The top three features that predict attrition are within the group that I initially highlighted. They are Job Level, Monthly Income and Overtime. Stock Option Level and Marital Status are also strong predictors.  
+<br>
+Obtaining marital status data may pose challenges due to potential privacy considerations, unlike the other predictors which are likely readily available through employment records.  
+<br>
+<br>
+**This provides an overview of the first step of my analysis process focusing on visual evidence.**  
+
+I started the analysis by plotting each variable separated by attrition group to compare their populations. Visually, the many features on this list seemed to show differences in these populations, but the four starred variables seemed particularly important.  
+<br>
+*Important features predicted by visual evidence:*  
+Age   
+Business Travel  
+Distance from home  
+Department  
+Education Field  
+Environmental Satisfaction  
+Job Involvement  
+Job Level *  
+Job Role  
+Job Satisfaction  
+Marital Status *  
+Monthly Income *  
+Number Companies Worked For  
+Overtime *  
+Relationship Satisfaction  
+Stock Option Level  
+Total Working Years  
+Work Life Balance  
+Years At Company  
+Years In Current Role  
+Years With Current Manager  
+<br>
+**To illustrate an example of positive and negative visual evidence, I plot attrition by job level and gender.**
+<br>
+```{r top3plots_1, message = FALSE, collapse = TRUE}
+# plot positive predictors example: Job Level for presentation
+# also plot negative predictor: Gender
+
+# I revert to using my original converted dataset `cs2_conv`.
+
+# plot positive predictor example: job level and attrition
+# calculation of proportion of employees: employees in job level attrition yes / total employees in job level, to normalize each job level 
+jobLevel_bar = cs2_conv %>%
+  group_by(JobLevel, Attrition) %>%
+  dplyr::summarize(n = n()) %>%
+  mutate(prop = n / sum(n)) %>%
+  filter(Attrition == "Yes") %>% 
+  ggplot(aes(y = JobLevel, x = prop, fill = JobLevel)) +
+  geom_bar(stat = "identity") +
+  labs(y = "Job Level", x = "Proportion of Attrition",
+       fill = "Job Level",
+       title = "Proportion of Attrition within Each Job Level",
+       caption = "Normalized by Total Employees per Job Level") +
+  theme_bw() +
+  scale_fill_brewer(palette = "Set1")
+print(jobLevel_bar)
+# ggsave(jobLevel_bar, filename = "plots/top3_jobLevel_bar.png")
+
+# plot negative predictor example: gender and attrition
+genderBar = cs2_conv %>% 
+  group_by(Gender, Attrition) %>%
+  dplyr::summarize(n = n()) %>%
+  mutate(prop = n / sum(n)) %>%
+  filter(Attrition == "Yes") %>% 
+  ggplot(aes(y = Gender, x = prop)) +
+  geom_bar(stat = "identity", fill = "#377EB8") + #fill color = Attrition group blue
+  labs(y = "Gender", x = "Proportion of Attrition",
+       fill = "Gender",
+       title = "Proportion of Attrition within Each Gender",
+       caption = "Normalized by Total Employees per Gender") +
+  theme_bw() +
+  theme(text = element_text(size = 12))
+genderBar
+# ggsave(genderBar, filename = "plots/top3negExample_genderBar.png")
+
+```
+<br>
+Job level 1 has a much higher percent attrition than any other job level. Over a quarter of the employees in job level 1 leave the company. This is at least 13% higher than any other job level. Also of note, only 5% of employees in job level 4 leave.  
+<br>
+On the other hand, gender doesn't contribute to attrition. There is very little difference in attrition rates between males and females (17% and 15%).  
+<br>
+
+**This provides an overview of the other steps in my analysis process focusing on statistical evidence and modeling.**  
+I tested for statistically significant differences in the attrition groups for each variable that was highlighted by visual evidence. For the numerical values, I used a t-test to predict the likelihood that the means of attrition groups are equal. For the categorical variables, I used a chi-square test to predict the likelihood that proportion of attrition is the same across categories of a variable.  
+<br>
+*These variables, including the four starred previously, had significant differences below the alpha 0.05 level.*  
+Age  
+Job Involvement  
+Job Level *  
+Job Role  
+Marital Status *  
+Monthly Income *  
+Overtime *  
+Stock Option Level  
+Total Working Years  
+Years At Company  
+Years In Current Role  
+Years With Current Manager  
+<br>
+From this list, I identified a subset of three variables that achieved the highest specificity when used in a predictive model for attrition. In the context of the model, specificity refers to the percentage of instances where attrition is correctly predicted.  
+<br>
+The subset of three top factors that lead to attrition are Job Level, Monthly Income and Overtime.  
+<br>
+```{r top3plots_2, message = FALSE, collapse = TRUE}
+# plot the other positive predictors for presentation: Monthly Income, Job Level and Overtime
+
+# plot monthly income and attrition with a boxplot and two histograms
+incomeBox = cs2_conv %>% 
+  ggplot(aes(x = MonthlyIncome, y = Attrition, fill = Attrition)) +
+  geom_boxplot() +
+  ylab("Attrition") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank()) +
+  scale_fill_brewer(palette = "Set1")
+
+yAtt_hist = cs2_conv %>% filter(Attrition == "Yes") %>% 
+  ggplot(aes(x = MonthlyIncome)) +
+  geom_histogram(binwidth = 1000, fill = "#377EB8") +
+  labs(title = "Distribution of Monthly Income by Employee Attrition",
+       y = "Yes") +
+  theme_bw() +
+    theme(legend.position = "none",
+          axis.title.x = element_blank())
+  
+nAtt_hist = cs2_conv %>% filter(Attrition == "No") %>% 
+  ggplot(aes(x = MonthlyIncome)) +
+  geom_histogram(binwidth = 1000, fill = "#E41A1C") +
+  labs(#title = "Employee Attrition and Monthly Income",
+       y = "No") +
+  theme_bw() + 
+  theme(legend.position = "none")
+
+incomePlt = yAtt_hist / incomeBox / nAtt_hist
+print(incomePlt)
+# ggsave(incomePlt, filename = "plots/top3_incomeDist.png")
+
+
+# make co-variation plots split by attrition groups
+
+# plot positive predictor: job level and monthly income
+income_jobLevel_box = ggplot(cs2_conv, aes(x = JobLevel, y = MonthlyIncome, fill = Attrition)) +
+  geom_boxplot() +
+  labs(x = "Job Level", y = "Monthly Income", fill = "Attrition") +
+  ggtitle("Monthly Income by Job Level and Attrition") +
+  theme_bw() + 
+  scale_fill_brewer(palette = "Set1")
+income_jobLevel_box
+# ggsave(income_jobLevel_box, filename = "plots/top3_income_jobLevel_box.png")
+
+
+# plot positive predictor: job level and attrition, with NO overtime
+# employees NOT working overtime
+jobLevel_OTno_bar = cs2_conv %>%
+  group_by(OverTime, JobLevel, Attrition) %>%
+  dplyr::summarize(n = n()) %>%
+  mutate(prop = n / sum(n)) %>%
+  filter(Attrition == "Yes" & OverTime == "No") %>%
+  ggplot(aes(y = JobLevel, x = prop, fill = JobLevel)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(y = "Job Level", x = "Proportion of Attrition",
+       fill = "Job Level",
+       subtitle = "Proportion of Attrition within Each Job Level",
+       title = "Employees with No Overtime Hours",
+       caption = "Normalized by Total Employees per Job Level") +
+  xlim(0.00, 0.55) +
+  theme_bw() +
+  theme(text = element_text(size = 12)) +
+  scale_fill_brewer(palette = "Set1")
+print(jobLevel_OTno_bar)
+# ggsave(jobLevel_OTno_bar, filename = "plots/top3_jobLevel_OTno_bar.png")
+
+# plot positive predictor: job level and attrition, with overtime
+# employees working at least an hour of overtime
+jobLevel_OTyes_bar = cs2_conv %>%
+  group_by(OverTime, JobLevel, Attrition) %>%
+  dplyr::summarize(n = n()) %>%
+  mutate(prop = n / sum(n)) %>%
+  filter(Attrition == "Yes" & OverTime == "Yes") %>%
+  ggplot(aes(y = JobLevel, x = prop, fill = JobLevel)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(y = "Job Level", x = "Proportion of Attrition",
+       fill = "Job Level",
+       subtitle = "Proportion of Attrition within Each Job Level",
+       title = "Employees Working Overtime",
+       caption = "Normalized by Total Employees per Job Level") +
+  xlim(0.00, 0.55) +
+  theme_bw() +
+  theme(text = element_text(size = 12)) +
+  scale_fill_brewer(palette = "Set1")
+print(jobLevel_OTyes_bar)
+# ggsave(jobLevel_OTyes_bar, filename = "plots/top3_jobLevel_OTyes_bar.png")
+
+# find 25th, 50th and 75th percentile of monthly incomes for each attrition group and job level
+# is there a stay/go cut off for job level 4
+mid50_income = cs2_conv %>%
+  group_by(Attrition, JobLevel) %>%
+  dplyr::summarise(q25 = quantile(MonthlyIncome, 0.25),
+            median = median(MonthlyIncome),
+            q75 = quantile(MonthlyIncome, 0.75))
+kable(mid50_income, caption = "monthly income q25, median, q75 for each job level and attrition group") %>% kable_styling(full_width = FALSE, position = "left")
+```
+<br>
+The plot of distributions of monthly income reveals a smaller income range and median income among employees that leave (in blue). The high-income outliers are likely due to factors like retirement.  
+<br>
+The boxplot of job levels and income illustrates the positive relationship between these variables. It reveals a large income gap between employees that stay and those that leave in job level 4. Job levels 1 and 3 have a small trend of attrition with lower median incomes.  
+<br>
+Attrition rates are low for all job levels in the graph of employees that do not work overtime, under 15% for job level 1 and under 10% for the others. However, the story changes for employees working at least an hour of overtime. Over 50% of employees in job level 1 working overtime choose to leave. This pattern holds true across all job levels except for job level 4, with attrition rates more than doubling among overtime workers.  
+<br>
+```{r top3plots_appendix, message = FALSE, collapse = TRUE}
+# extra plots for the appendix
+
+# plot positive predictor example: overtime and attrition
+# calculation of proportion of employees: employees in overtime group & attrition yes / total employees in overtime group, to normalize each overtime group 
+overtime_bar = cs2_conv %>%
+  group_by(OverTime, Attrition) %>%
+  dplyr::summarize(n = n()) %>%
+  mutate(prop = n / sum(n)) %>%
+  filter(Attrition == "Yes") %>% 
+  ggplot(aes(y = OverTime, x = prop)) +
+  geom_bar(stat = "identity", fill = "#377EB8") +
+  labs(y = "Overtime", x = "Proportion of Attrition",
+       fill = "Overtime",
+       title = "Proportion of Attrition for Employees With and Without Overtime",
+       caption = "Normalized by Total Employees per OT Group") +
+  theme_bw() +
+  scale_fill_brewer(palette = "Set1")
+print(overtime_bar)
+# ggsave(overtime_bar, filename = "plots/appendix/top3_overtime_bar.png")
+
+# plot positive predictor: monthly income and overtime
+income_OT_box = ggplot(cs2_conv, aes(x = OverTime, y = MonthlyIncome, fill = Attrition)) +
+  geom_boxplot() +
+  labs(x = "Overtime", y = "Monthly Income", fill = "Attrition") +
+  ggtitle("Monthly Income by Overtime and Attrition") +
+  theme_bw() +
+  scale_fill_brewer(palette = "Set1")
+print(income_OT_box)
+# ggsave(income_OT_box, filename = "plots/appendix/top3_income_OT_box.png")
+
+```
+<br>
+The attrition rate for overtime workers is more than three times that of employees that don't work any overtime.  
+<br>
+There is a larger income gap between attrition groups in employees working overtime, indicating a possibility that lower income and overtime make attrition more likely.  
+<br>
+<br>
+**Top three factors leading to attrition: summary of trends, takeaways, and recommendations**  
+**Income**  
+There is a large income gap between employees that stay and those that leave in job level 4. Those that leave have a median income just under 13,000, while those that stay have a median income of almost 16,000. Job levels 1 and 3 have a small trend of attrition with lower median incomes. Overall, the median income for employees that leave is smaller than that of those that stay.    
+<br>
+**Job Level**  
+Over a quarter of the employees in job level 1 leave the company, a much higher attrition rate than any other job level.  
+<br>
+**Overtime**  
+Over 50% of employees in job level 1 working overtime choose to leave. This pattern holds true across all job levels except for job level 4, with attrition rates more than doubling among overtime workers.  
+<br>
+**Recommendations**  
+Job level 4, if below 14,000, increase monthly pay. For all other job levels, reduce overtime. Job level 1 increase pay and promote to job level 2.  
+<br>
+<br>
+
+### Objective 2: Identify job role specific trends.  
+<br>
+**For each numerical variable, I plot the job roles in side-by-side box plots. Using bar plots, I plot the proportion of the levels of each categorical variable grouped by job roles.**
+<br>
+```{r jobRolePlots, message = FALSE}
+
+# reorder levels of JobRole from low income/level to high
+cs2_conv$JobRole = factor(cs2_conv$JobRole, levels = c("Sales Representative", "Laboratory Technician", "Human Resources", "Research Scientist", "Sales Executive", "Healthcare Representative", "Manufacturing Director", "Research Director", "Manager"))
+
+# rename numerical and categorical variables for nicer axis titles
+custom_labels = list(
+  JobLevel = "Job Level",
+  JobRole = "Job Role",
+  MaritalStatus = "Marital Status",
+  MonthlyIncome = "Monthly Income",
+  OverTime = "Overtime",
+  StockOptionLevel = "Stock Option Level",
+  TotalWorkingYears = "Total Working Years",
+  YearsAtCompany = "Years At Company",
+  YearsInCurrentRole = "Years in Current Role",
+  YearsWithCurrManager = "Years with Current Manager"
+)
+
+# a function to get the appropriate label from the list above
+get_label = function(var) {
+  if (var %in% names(custom_labels)) {
+    return(custom_labels[[var]])
+  } else {
+    return(var)
+  }
+}
+
+# numerical_columns = colnames(cs2_numerical)
+for (numvar in numerical_columns) {
+  boxplot = cs2_conv %>%  
+    ggplot(aes(x = .data[[numvar]], y = JobRole, fill = JobRole)) +
+    geom_boxplot() +
+    labs(title = paste("Job Role vs", get_label(numvar)),
+         x = get_label(numvar), y = "Job Role") +
+    theme_bw() +
+    theme(legend.position = "none",
+          text = element_text(size = 12)) +
+    scale_fill_brewer(palette = "Spectral")
+  
+  # display each plot
+  print(boxplot)
+  
+  # create a unique filename for each plot
+  filename = paste0("plots/JobRole/boxplt_JobRole_vs_", numvar, ".png")
+  
+  # save the plots
+  # ggsave(filename, plot = boxplot, device = "png")
+}
+
+# categorical_columns = colnames(cs2_categorical)
+cat_cols = categorical_columns[!categorical_columns %in% "JobRole"]
+
+for (catvar in cat_cols) {
+  barplot = cs2_conv %>%
+    group_by(JobRole, .data[[catvar]], .drop = FALSE) %>%
+    dplyr::summarize(count = n(), .groups = 'drop') %>%
+    group_by(JobRole) %>%
+    mutate(prop = count / sum(count)) %>%
+    ggplot(aes(y = JobRole, x = prop, fill = .data[[catvar]])) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(title = paste("Job Role vs", get_label(catvar)),
+         y = "Job Role", x = "Proportion", fill = get_label(catvar)) +
+    theme_bw() +
+    theme(legend.position = "right",
+          text = element_text(size = 12)) +
+    scale_fill_brewer(palette = "Set1")
+  
+  #display each plot
+  print(barplot)
+  
+  # create a unique filename for each plot
+  filename = paste0("plots/JobRole/barplot_JobRole_vs_", catvar, ".png")
+  
+  # save the plots
+  # ggsave(filename, plot = barplot, device = "png")
+}
+
+```
+<br>
+
+**Trends in Job Roles**  
+
+1. **Attrition, Tenure and Role Duration:**  
+
+  - Sales reps, lab techs, research scientists, and HR roles leave the company sooner than other roles and have the fewest total working years and number of companies worked.  
+  - Sales reps and lab techs have the shortest duration in role and with manager.  
+  - Median duration in role and with manager for sales reps, lab techs, research scientists, and HR is around 2 years, which is the 25th percentile of other roles.  
+  - Managers and research directors tend to stay the longest at the company.  
+  - The highest duration in role and with manager is for managers, research directors, and manufacturing directors. 
+  
+2. **Income Distribution:**  
+
+  - Monthly income splits into three groups (follow-up to investigate significance):  
+    - Low: Median between $2500-3000 (sales reps, research scientists, lab techs, HR)  
+    - Middle: Median between $6500-7000 (sales execs, manufacturing directors, healthcare reps)  
+    - High: Median around $16000-17000 (managers, research directors)  
+3. **Job Level:**  
+
+  - Sales reps have the lowest job levels (1-2).  
+  - Research scientists, lab techs, and HR roles range from 1-3.  
+  - Sales execs, manufacturing directors and healthcare reps fall in the middle range, 2-4.  
+  - The only roles with level 5 are managers and research directors, with ranges from 3-5.  
+
+4. **Age:**  
+
+  - Age follows the same trend as income and job level grouping, though there is more overlap in low and middle tiers.  
+  - There is a wide age spread for research scientists (less than 20 to nearly 60).  
+
+5. **Training, Promotion and Salary Increase:**  
+
+  - Training times and percent salary hike are similar for all roles.  
+  - Median years since promotion is around 1 for all roles except managers whose median is 3 years.  
+
+6. **Monthly, Daily and Hourly Rates:**  
+
+  - The spread is nearly the same for all roles.  
+  - Managers have the highest monthly and hourly rates, yet the lowest daily rates.  
+  - HR has the lowest median monthly and hourly rates.  
+  - Healthcare reps have the highest daily rates.  
+  - This suggests these rates are not related to pay (or billing).  
+
+7. **Employee Demographics:**  
+
+  - Employee numbers are generally spread evenly across all roles, though HR has higher employee numbers. I assume this is an employee company ID number and doubt there is much significance.   
+  - Managers tend to live closer to work. Median distance for sales reps is intermediate. All other roles have a similar spread in distance from home and tend to live further from work.  
+  - Most roles are somewhat dominated by men except for sales reps, manufacturing directors, and managers.  
+
+8. **Job Involvement and Satisfaction:**  
+
+  - Job involvement, stock options, work-life balance, and travel seem distributed similarly.  
+  - Sales reps unsurprisingly have more frequent travel, yet unlike all other job roles, none of them say they have poor work-life balance.  
+  - Research scientists have the highest proportion of overtime, followed by sales reps. Managers have the lowest.  
+  - HR personnel have very high relationship satisfaction (with manager).  
+  - Manufacturing directors have very high environment satisfaction. Heathcare reps and lab techs also have positive environment satisfaction. However, research directors and managers have the highest proportion of low environmental satisfaction across all roles.  
+
+9. **Marital Status:**  
+
+  - Most sales reps are single, yet divorce rates are lowest among sales reps.  
+  - Marriage rates are highest among managers.  
+  - Divorce rate trends are highest in HR personnel.  
+
+10. **Education:**  
+
+  - Sales reps have the lowest education level. Nearly 25% did not attend college, and another nearly 25% did not graduate from college. None hold doctorate degrees.  
+  - All roles range from over 5% with no college to a percentage that hold doctorate degrees, even research directors. Additionally, research directors have the highest proportion of doctorate degrees.  
+  - Sales execs have the highest proportion with a master’s degree.  
+
+11. **Job Roles & Departmental Breakdown:**  
+
+  - Job Roles align with education field and department.  
+  - Only human resource roles and managers hold human resource degrees.  
+  - Likewise, only sales roles and managers hold marketing degrees.  
+  - All the roles have a high proportion of employees with life science degrees and also have employees with other types of degrees.  
+  - Managers fall into all departments.  
+  - HR roles are in the HR department.  
+  - Sales reps and execs are in the Sales department.  
+  - The rest are in the Research and Development department.  
+<br>
+
+**As job roles seem to segregate into 3 groups by monthly income and other factors like job level, years in current role, with manager and at company, total working years and to a lesser extent age, I make a new median income level variable and group them into low, middle and high levels. Then I use a t-test to see if the difference in mean incomes between the pairs of levels (low vs. mid and mid vs. high) are significantly different. I also plot the derived variables Percent work years at company and Percent year in role at company vs the job roles and run t-tests to check for differences in these mean percents between the grouped income levels.**
+<br>
+```{r, message = FALSE, comment = ""}
+
+# reorder levels of JobRole
+cs2_conv2$JobRole = factor(cs2_conv2$JobRole, levels = c("Sales Representative", "Laboratory Technician", "Human Resources", "Research Scientist", "Sales Executive", "Healthcare Representative", "Manufacturing Director", "Research Director", "Manager"))
+
+# group roles by median income level (low, med, high)
+# test difference in salary between low and mid and mid and high
+cs2_conv2 = cs2_conv2 %>% 
+  mutate(incomeGroup = case_when(
+      JobRole %in% c("Sales Representative", "Research Scientist", "Human Resources", "Laboratory Technician") ~ "Low",
+      JobRole %in% c("Sales Executive", "Manufacturing Director", "Healthcare Representative") ~ "Medium",
+      TRUE ~ "High"
+    )
+  ) %>%
+  mutate(incomeGroup = factor(incomeGroup, levels = c("Low", "Medium", "High")))
+
+# check the conversion
+# head(cs2_conv2)
+
+# filter the data
+cs2_LowMid = cs2_conv2 %>% filter(incomeGroup != "High")
+cs2_MidHigh = cs2_conv2 %>% filter(incomeGroup != "Low")
+
+# perform t-tests
+t_test_LowMid = t.test(MonthlyIncome ~ incomeGroup, data = cs2_LowMid)
+t_test_MidHigh = t.test(MonthlyIncome ~ incomeGroup, data = cs2_MidHigh)
+
+# print the results
+t_test_LowMid
+t_test_MidHigh
+
+```
+<br>
+Unsurprisingly, there is overwhelming evidence that mean incomes between income groups are significantly different.  
+<br>
+*For follow-up*  
+It would be interesting to follow-up by plotting the 3 income groups and income or other features of interest split by attrition groups. Also, it would be good to investigate trends in income, job level, and overtime between the different attrition groups in different job roles.  
+<br>
+<br>
+
+### Objective 3: Build a model to predict attrition.  
+(with a minimum of 60% sensitivity and 60% specificity)  
+<br>
+**I start with a Naive Bayes model to predict attrition. There are 33 possible explanatory features in the data set. I choose to start with the 18 that earlier analyses suggest may be significantly different between the attrition groups. The goal with this block of code is to build an externally validated model with 100 different train/test splits of those 18 features. Then using intuition from earlier analyses, I remove one feature at a time, until I have maximized the specificity of the model.**
+<br>
+```{r attritionModel_NB, comment = ""}
+# Naive Bayes classifier
+# start with lots of explanatory variables and distill down manually one at a time using domain knowledge
+
+# str(cs2_conv2) #this is the dataframe with my derived variables too
+
+
+# list indexes of explanatory variables 
+
+# for reference:
+# modelIdx = c(2,4:9,11:19,21,22,25:27,29:40) #list of all possible features
+# modelIdx = c(16,19,20,24,29) #top 5 features
+
+# start here: list of indexes of 18 significant variables (alpha = 0.05) from t-tests and chi-square tests
+# modelIdx = c(2,4,6,7,12,15,16,17,18,19,20,24,29,30,32,33,34,36) #significant features: sens 85.6%, spec 60.7%
+
+# end here: list of indexes which produced highest specificity, derived manually
+modelIdx = c(12,15,16,17,19,20,24,29,30,32,33,34,36) #sensitivity: 84.4% specificity: 62.3%
+
+# other promising combinations:
+# modelIdx = c(2,12,15,16,17,19,20,24,29,30,32,33,34,36) #84.2, 61.4
+# modelIdx = c(12,15,16,17,20,24,29,30,32,33,34,36) #84.6, 61.3
+# modelIdx = c(15,16,17,20,24,29,30,32,33,34,36) #84, 60.5
+
+
+# list the explanatory variables used
+names(cs2_conv2[,modelIdx])
+
+# how many explanatory variables are used
+length(modelIdx)
+
+# 100 different splits
+iters = 100
+
+# make holders for the stats from each iteration
+masterAccu = matrix(nrow = iters, ncol = 2)
+masterPval = matrix(nrow = iters, ncol = 2)
+masterSens = matrix(nrow = iters, ncol = 2)
+masterSpec = matrix(nrow = iters, ncol = 2)
+
+# 70-30 train/test split
+splitPerc = .7
+
+for(i in 1:iters)
+{
+  set.seed(i)
+  
+  # sample 70%
+  trainIdx = sample(1:dim(cs2_conv2)[1], round(splitPerc*dim(cs2_conv2)[1]))
+  # choose the rows that match those sampled numbers for training
+  AttritionTrn = (cs2_conv2[trainIdx,])
+  # and the others for testing
+  AttritionTst = (cs2_conv2[-trainIdx,])
+  
+  # head(AttritionTrn)
+  # head(AttritionTst)
+  
+  # give the model the training variables, training labels
+  modelNB = naiveBayes(AttritionTrn[,modelIdx], AttritionTrn$Attrition, laplace = 1)
+  
+  # use the model and testing explanatory variables (modelIdx) to predict the testing labels
+  preds = predict(modelNB, AttritionTst[,modelIdx])
+  
+  # make a confusion matrix comparing the predicted labels to the true labels
+  # predicted labels = rows, true labels = cols
+  CM = confusionMatrix(table(preds, AttritionTst$Attrition))
+  
+  masterAccu[i,] = c(i, CM$overall["Accuracy"])
+  masterPval[i,] = c(i, CM$overall["AccuracyPValue"])
+  masterSens[i,] = c(i, CM$byClass["Sensitivity"])
+  masterSpec[i,] = c(i, CM$byClass["Specificity"])
+}
+
+# organize the output data
+colnames(masterAccu) = c("Seed", "Accuracy")
+colnames(masterPval) = c("Seed", "AccuracyPValue")
+colnames(masterSens) = c("Seed", "Sensitivity")
+colnames(masterSpec) = c("Seed", "Specificity")
+NB_results = merge(as.data.frame(masterAccu), as.data.frame(masterPval), by = "Seed", all = TRUE)
+NB_results = merge(NB_results, as.data.frame(masterSens), by = "Seed", all = TRUE)
+NB_results = merge(NB_results, as.data.frame(masterSpec), by = "Seed", all = TRUE)
+
+NB_stats = colMeans(NB_results[,2:5])
+NB_stats = data.frame(
+  Metric = c("Accuracy", "AccuracyPValue", "Sensitivity", "Specificity"),
+  Value = c(sprintf("%.1f%%", NB_stats[1]*100),
+            sprintf("%.2e", NB_stats[2]),
+            sprintf("%.1f%%", NB_stats[3]*100),
+            sprintf("%.1f%%", NB_stats[4]*100)))
+
+# output the metrics of the naive bayes model
+cat("Naive Bayes \n")
+cat("Accuracy:", NB_stats[1,2], "\n")
+cat("Accuracy P-Value:", NB_stats[2,2], "\n")
+cat("Sensitivity:", NB_stats[3,2], "\n")
+cat("Specificity:", NB_stats[4,2], "\n")
+
+```
+<br>
+I start with these 18 features: Age, BusinessTravel, Department, DistanceFromHome, EnvironmentSatisfaction, JobInvolvement, JobLevel, JobRole, JobSatisfaction, MaritalStatus, MonthlyIncome, OverTime, StockOptionLevel, TotalWorkingYears, WorkLifeBalance, YearsAtCompany, YearsInCurrentRole, YearsWithCurrManager.  
+<br>
+Using the method described above, I am able to achieve the highest specificity of 62.3% and a combined sensitivity and specificity of 146.7 with 13 features: EnvironmentSatisfaction, JobInvolvement, JobLevel, JobRole, MaritalStatus, MonthlyIncome, OverTime, StockOptionLevel, TotalWorkingYears, WorkLifeBalance, YearsAtCompany, YearsInCurrentRole, YearsWithCurrManager.  
+<br>
+<br>
+**Then I attempt to validate my predicted best features for the model with help from chatGPT. I asked chatGPT to help me write a nested loop that would find every combination of a defined number of features, rank them by highest specificity and return the top ten combinations. For each iteration of the loop, I asked it to increase the number of features by one, breaking out of the loop when the specificity stopped increasing. This is very computationally heavy, and there is a bug in the code when outputting results related to breaking out of the loop.**
+<br>
+```{r openAI_featurePredict, eval = FALSE}
+# perhaps it would be more efficient to do the train test splits on the outer loop?
+# also I should place the progress reporter (Sys.time()) in a different place in the code
+
+# Function to calculate sensitivity, specificity for all combinations of a given number of variables
+calculate_combinations <- function(modelIdx, max_vars = 18, iters = 10, splitPerc = 0.7) {
+  
+  # Initialize an empty list to store results
+  results_list <- list()
+  
+  # Initialize a variable to keep track of the maximum specificity reached
+  max_specificity_so_far <- 0
+  
+  # Initialize a variable to store the maximum mean specificity from previous iterations
+  max_mean_specificity_previous <- 0
+
+  # Loop over different number of variables
+  for (num_vars in seq(8, max_vars)) {
+    cat("Number of variables:", num_vars, "\n")
+    start_time <- Sys.time()
+    
+    # Generate all combinations of variables
+    index_combinations <- combinat::combn(modelIdx, num_vars)
+    
+    # Initialize an empty list to store results for this iteration
+    temp_results_list <- list()
+    
+    # Loop through each combination of variables
+    for (i in 1:ncol(index_combinations)) {
+      index_set <- index_combinations[, i]
+      
+      # Create holders for the sensitivity, specificity for each iteration
+      masterSens <- numeric(iters)
+      masterSpec <- numeric(iters)
+      
+      # Iterate over the specified number of iterations
+      for (j in 1:iters) {
+        set.seed(j)
+        
+        # Sample 70% for training
+        trainIdx <- sample(1:dim(cs2_conv2)[1], round(splitPerc * dim(cs2_conv2)[1]))
+        # Select the rows for training
+        AttritionTrn <- cs2_conv2[trainIdx, ]
+        # Select the remaining rows for testing
+        AttritionTst <- cs2_conv2[-trainIdx, ]
+        
+        # Temporarily set the current indexes for modeling
+        temp_modelIdx <- index_set
+        
+        # Train the model
+        modelNB <- naiveBayes(AttritionTrn[, temp_modelIdx], AttritionTrn$Attrition, laplace = 1)
+        
+        # Predict using the model
+        preds <- predict(modelNB, AttritionTst[, temp_modelIdx])
+        
+        # Confusion matrix
+        CM <- confusionMatrix(table(preds, AttritionTst$Attrition))
+        
+        # Store sensitivity, specificity
+        masterSens[j] <- CM$byClass["Sensitivity"]
+        masterSpec[j] <- CM$byClass["Specificity"]
+      }
+      
+      # Average sensitivity, specificity
+      avg_sensitivity <- mean(masterSens)
+      avg_specificity <- mean(masterSpec)
+      
+      # Store the results including the combination of variables
+      temp_results_list[[i]] <- list(variables = index_set, Sensitivity = avg_sensitivity, Specificity = avg_specificity)
+    }
+    
+    end_time <- Sys.time()
+    time_taken <- end_time - start_time
+    cat("Time taken:", time_taken, "\n")
+    
+    # Store the results for this iteration
+    results_list[[num_vars]] <- temp_results_list
+    
+    # Get the maximum mean specificity for this number of variables
+    max_mean_specificity_current <- max(sapply(temp_results_list, function(x) x$Specificity))
+    
+    # Check if the maximum mean specificity for the current number of variables is less than the previous maximum
+    if (max_mean_specificity_current < max_mean_specificity_previous) {
+      cat("Maximum specificity reached for", num_vars, "variables is less than previous maximum. Stopping further iterations.\n")
+      break
+    }
+    
+    # Update the maximum mean specificity from previous iterations
+    max_mean_specificity_previous <- max_mean_specificity_current
+  }
+  
+  return(results_list)
+}
+
+# Define the list of indexes to loop through
+modelIdx <- c(2,4,6,7,12,15,16,17,18,19,20,24,29,30,32,33,34,36) #significant features
+
+# Define the maximum number of variables
+max_vars <- 18
+
+# Call the function to calculate combinations
+results <- calculate_combinations(modelIdx, max_vars)
+
+# Determine the maximum expected number of combinations
+max_combinations <- max_vars * 10  # Assuming a maximum of 10 combinations per number of variables
+
+# Preallocate the output data frame with maximum expected number of rows
+output_df <- data.frame(Number_of_Variables = integer(max_combinations),
+                        Variable_Indexes = character(max_combinations),
+                        Mean_Sensitivity = numeric(max_combinations),
+                        Mean_Specificity = numeric(max_combinations),
+                        Sum_of_Sensitivity_and_Specificity = numeric(max_combinations),
+                        stringsAsFactors = FALSE)
+
+# Loop over different number of variables
+for (num_vars in seq(8, max_vars)) {
+  cat("\nTop 10 combinations with the highest specificity for", num_vars, "variables:\n")
+
+  sorted_indices <- order(sapply(results[[num_vars]], function(x) x$Specificity), decreasing = TRUE)
+  for (i in 1:min(10, length(sorted_indices))) {
+    index <- sorted_indices[i]
+    cat("Combination", i, ": Variables =", results[[num_vars]][[index]]$variables, ", Specificity =", results[[num_vars]][[index]]$Specificity, "\n")
+
+    # Assign the results to the preallocated rows in the output data frame
+    row_index <- (num_vars - 10) * 10 + i  # Calculate the row index
+    output_df$Number_of_Variables[row_index] <- num_vars
+    output_df$Variable_Indexes[row_index] <- paste(results[[num_vars]][[index]]$variables, collapse = ", ")
+    output_df$Mean_Sensitivity[row_index] <- results[[num_vars]][[index]]$Sensitivity
+    output_df$Mean_Specificity[row_index] <- results[[num_vars]][[index]]$Specificity
+    output_df$Sum_of_Sensitivity_and_Specificity[row_index] <- results[[num_vars]][[index]]$Sensitivity + results[[num_vars]][[index]]$Specificity
+  }
+}
+
+# Print the final output data frame
+print(output_df)
+
+```
+<br>
+This is useful for a few reasons. It confirms that the 13 variables I chose `modelIdx = c(12,15,16,17,19,20,24,29,30,32,33,34,36)` result in the highest specificity (61.7%) for all combinations of 13 variables. It also returns higher specificity, 62.6% with 14 variables, the 13 above, plus `Department` (index 6) and 62.2% with 15 variables, the 13 above, plus `BusinessTravel` and `DistanceFromHome` (indexes 4 and 7).  
+<br>
+<br>
+**I want to use several of the best combinations of explanatory variables to try to tune the laplace smoothing parameter. I also want to see if I can adjust and tune the thresholding, because the dataset is unbalanced with only 16% "Yes" in the Attrition variable. I evaluate all combinations of variables and tuning parameters by averaging external and internal validation results.**
+<br>
+```{r tuningNB, comment = ""}
+# computationally expensive, not sure how to do it a better way
+
+# define parameters (the ones I really used)
+# modelIdx_list = list(
+#   c(2, 12, 15, 16, 17, 19, 20, 24, 29, 30, 32, 33, 34, 36),      # Combination 1
+#   c(12, 15, 16, 17, 19, 20, 24, 29, 30, 32, 33, 34, 36),         # Combination 2
+#   c(6, 12, 15, 16, 17, 19, 20, 24, 29, 30, 32, 33, 34, 36),      # Combination 3
+#   c(4, 7, 12, 15, 16, 17, 19, 20, 24, 29, 30, 32, 33, 34, 36),   # Combination 4
+#   c(4, 6, 7, 12, 15, 16, 17, 19, 20, 24, 29, 30, 32, 33, 34, 36) # Combination 5
+# )
+# alphas = seq(0.1, 1, 0.1) #smoothing parameters to try
+# thresholds = seq(0.1, 0.6, 0.02) #classifier thresholds to try for "Yes" based on ~0.16 proportion yes to no
+# iters = 100  #train/test split iterations
+# splitPerc = 0.7  #percentage of data for training
+
+# define shortened parameters for demo purposes
+modelIdx_list = list(
+  c(12, 15, 16, 17, 19, 20, 24, 29, 30, 32, 33, 34, 36),         # Combination 2 (my hand-picked variables)
+  c(4, 7, 12, 15, 16, 17, 19, 20, 24, 29, 30, 32, 33, 34, 36)    # Combination 4 (the *best*)
+)
+alphas = seq(0.1, 0.9, 0.2) #smoothing parameters to try
+thresholds = seq(0.3, 0.5, 0.05) #classifier thresholds to try for "Yes" based on ~0.16 proportion yes to no
+iters = 10  #train/test split iterations
+splitPerc = 0.7  #percentage of data for training
+
+# initialize a list to store results
+results_list = list()
+
+# time the loop 
+loop_start = Sys.time()
+
+# loop through modelIdx combinations
+for (modelIdx in modelIdx_list) {
+  
+  # loop through the alphas
+  for (alpha in alphas) {
+    
+    # loop through the thresholds
+    for (threshold in thresholds) {
+      
+      # time the threshold loop
+      thresh_start = Sys.time()
+      
+      # make holders for the stats from each iteration for this modelIdx, alpha, and threshold
+      iteration_stats = matrix(nrow = iters, ncol = 5)
+      colnames(iteration_stats) = c("Seed", "Threshold", "Alpha", "Sensitivity", "Specificity")
+      
+      # counter for row index in iteration_stats
+      row_counter = 1
+      
+      # external cross-validation loop
+      for (i in 1:iters) {
+
+        set.seed(i)
+
+        # generate the test train split
+        trainIdx = sample(1:nrow(cs2_conv), round(splitPerc * nrow(cs2_conv)))
+        AttritionTrn = cs2_conv[trainIdx, ]
+        AttritionTst = cs2_conv[-trainIdx, ]
+
+        # train Naive Bayes model with current alpha and feature (modelIdx) set
+        modelNB = naiveBayes(AttritionTrn[, modelIdx], AttritionTrn$Attrition, laplace = alpha)
+
+        # predict on testing set
+        preds = predict(modelNB, AttritionTst[, modelIdx], type = "raw") # raw returns the probabilities
+
+        attrition_probs = preds[, "Yes"]
+
+        predictions = ifelse(attrition_probs >= threshold, "Yes", "No")
+
+        # calculate confusion matrix
+        CM_no = confusionMatrix(table(predictions, AttritionTst$Attrition))
+
+        # get sensitivity and specificity for "No" class
+        sens_no = CM_no[4]$byClass["Sensitivity"] # because reference (positive class) is set to no
+        spec_no = CM_no[4]$byClass["Specificity"]
+
+        # store results for that iteration
+        iteration_stats[row_counter, ] = c(i, threshold, alpha, sens_no, spec_no)
+        row_counter = row_counter + 1
+
+      } # complete external cross-validation loop
+      
+      # initialize variables to store predictions and actual values to calculate confusion matrix after all LOO
+      all_predictions = c()
+      all_actual = c()
+      
+      # internal cross-validation loop (Leave-One-Out Cross-Validation)
+      for (row in 1:nrow(cs2_conv)) {
+        
+        # generate the test train split
+        AttritionTrn = cs2_conv[-row, ]
+        AttritionTst = cs2_conv[row, ]
+        
+        # train Naive Bayes model with current alpha and feature (modelIdx) set
+        modelNB = naiveBayes(AttritionTrn[, modelIdx], AttritionTrn$Attrition, laplace = alpha)
+        
+        # predict on testing set
+        preds = predict(modelNB, AttritionTst[, modelIdx], type = "raw") # raw returns the probabilities
+        
+        attrition_probs = preds[,"Yes"]
+        attrition_probs = attrition_probs[["Yes"]] # get just the probability from the named number
+
+        predictions = ifelse(attrition_probs >= threshold, "Yes", "No")
+        
+        # accumulate predictions and actual values
+        all_predictions = c(all_predictions, predictions)
+        all_actual = c(all_actual, as.character(AttritionTst$Attrition)) # turn factors to characters to match all_actual
+        
+      } # complete internal cross-validation loop
+
+      # calculate confusion matrix using all predictions and actual values
+      CM_no = confusionMatrix(table(all_predictions, all_actual))
+      
+      # get sensitivity and specificity for "No" class
+      sens_icv = CM_no[4]$byClass["Sensitivity"] # because reference (positive class) is set to no
+      spec_icv = CM_no[4]$byClass["Specificity"]
+      
+      # calculate mean sensitivity and specificity over ECV and ICV for this combination of modelIdx, alpha, and threshold
+      # not sure if this is the best way since there are many more test/train splits in ICV
+      # also don't know if people ever really average ECV and ICV results
+      avg_sens = mean(c(mean(iteration_stats[, "Sensitivity"]), sens_icv))
+      avg_spec = mean(c(mean(iteration_stats[, "Specificity"]), spec_icv))
+      
+      # store results for this combination of modelIdx, alpha, and threshold
+      results_list = c(results_list, list(
+        data.frame(
+          ModelIdx = toString(modelIdx),
+          Alpha = alpha,
+          Threshold = threshold,
+          AvgSensitivity = avg_sens,
+          AvgSpecificity = avg_spec,
+          AvgSum = avg_sens + avg_spec
+        )
+      ))
+
+        # time the threshold loop
+        thresh_end = Sys.time()
+        time_taken_thresh = difftime(thresh_end, thresh_start, units = "secs")
+        cat("Threshold Loop Time:", time_taken_thresh, "secs \n")
+        cat("ModelIdx:", toString(modelIdx), "- Alpha:", alpha, "- Threshold:", threshold, "\n")
+      
+    } # complete threshold loop
+
+  } # complete alpha loop
+  
+} # complete modelIdx loop
+
+# loop time
+loop_end = Sys.time()
+time_taken_loop = difftime(loop_end, loop_start, units = "mins")
+cat("Total Loop Time:", time_taken_loop, "mins \n")
+
+# convert results_list to a data frame
+results_df = do.call(rbind, results_list)
+
+# output top 10 combinations for each ModelIdx
+top_10_combos = results_df %>%
+  arrange(ModelIdx, desc(AvgSum), desc(AvgSpecificity), desc(AvgSensitivity)) %>%
+  group_by(ModelIdx) %>%
+  #top_n(10, wt = AvgSum)
+  #make a shorter version for demo purpose
+  top_n(5, wt = AvgSum)
+kable(top_10_combos, caption = "demo top 10 sensitivity + specificity tuned parameter combos") %>% kable_styling(full_width = FALSE, position = "left")
+
+```
+<br>
+Based on this parameter tuning, the highest sum of sensitivity and specificity scores my Naive Bayes model achieves is 148.79 (Sensitivity of 83.11% and Specificity of 65.68%). The optimization was achieved with `ModelIdx = c(4, 7, 12, 15, 16, 17, 19, 20, 24, 29, 30, 32, 33, 34, 36)`, which are the indexes of the columns in `cs2_conv`, `alpha = 0.7` and `threshold (of "Yes" >=) = 0.46`. The variables are `BusinessTravel`, `DistanceFromHome`, `EnvironmentSatisfaction`, `JobInvolvement`, `JobLevel`, `JobRole`, `MaritalStatus`, `MonthlyIncome`, `OverTime`, `StockOptionLevel`, `TotalWorkingYears`, `WorkLifeBalance`, `YearsAtCompany`, `YearsInCurrentRole`, `YearsWithCurrManager`. Now, I will train my model using these and the full data set and use that to predict the labels on the competition set.  
+<br>
+<br>
+**I would like to compare a k-Nearest Neighbors (k-NN) model to the Naive Bayes model. I want to see if I can use k-NN with both numerical and categorical variables, or just numerical (maybe convert the numerical factors back to numbers). Another option would be to fit separate models to each category in the categorical variables. I may want to experiment with the explanatory variables used, scale the variables, try ECV + ICV, tune k, tune the threshold or over or under-sample. I start by transforming the variables.**
+<br>
+```{r KNNtransformVariables}
+# starting with the original dataset `cs2` since the ordinal categorical variables are in an integer class
+# there are a few other variables that I could transform into ranked like business travel
+# not sure it is valid to do it for marital status or overtime
+
+# make a copy of the original dataset
+numerical_df = cs2
+
+# check the data
+# head(numerical_df$BusinessTravel)
+
+# reorder factor levels
+numerical_df$BusinessTravel = factor(numerical_df$BusinessTravel, levels = c("Non-Travel", "Travel_Rarely", "Travel_Frequently"), labels = c("Non-Travel", "Travel_Rarely", "Travel_Frequently"))
+
+# rename the levels to numbers
+levels(numerical_df$BusinessTravel) = c(1:3)
+
+# convert factor to integer
+numerical_df$BusinessTravel = as.integer(numerical_df$BusinessTravel)
+
+# check the conversion
+# head(numerical_df$BusinessTravel)
+
+# repeat for marital status and overtime :/
+# head(numerical_df$MaritalStatus)
+numerical_df$MaritalStatus = factor(numerical_df$MaritalStatus, levels = c("Single", "Married", "Divorced"), labels = c("Single", "Married", "Divorced"))
+levels(numerical_df$MaritalStatus) = c(1:3)
+numerical_df$MaritalStatus = as.integer(numerical_df$MaritalStatus)
+# head(numerical_df$MaritalStatus)
+
+# head(numerical_df$OverTime)
+numerical_df$OverTime = factor(numerical_df$OverTime, levels = c("Yes", "No"), labels = c("Yes", "No"))
+levels(numerical_df$OverTime) = c(1:2)
+numerical_df$OverTime = as.integer(numerical_df$OverTime)
+# head(numerical_df$OverTime)
+
+# scale the variables
+# str(numerical_df)
+# list of columns to exclude from scaling
+exclude_columns = c("ID", "EmployeeCount", "EmployeeNumber", "StandardHours")
+# scale the numeric variables and reassign values to same columns
+numerical_df = numerical_df %>%
+  mutate_at(vars(-matches(paste(exclude_columns, collapse = "|"))), 
+            .funs = function(x) if(is.numeric(x)) scale(x) else x)
+# str(numerical_df)
+
+```
+<br>
+<br>
+**This is a modified version of the NB variable optimization code block from above. I start with the variables with evidence of signficant (p < 0.05) differences between the attrition groups. They are either integers or I can reasonably order their levels and tranform them into integers. If they can't reasonably be ordered, for example department and job role, I don't include them. This loop finds all the unique combinations of a specified number of these scaled, numeric variables. It iterates through a number of train/test splits and finds the mean sensitivity, specificity and sum of those for each combination for that number of variables. It returns the top ten combinations for that number of variables. Then each loop increases the number of variables used in the model by one.**
+<br>
+```{r KNNvariableOptimization, eval = FALSE}
+# this is a computationally heavy, lengthy process depending on iterations.
+
+modelIdx_num = c(2, 4, 7, 12, 15, 16, 18, 19, 20, 24, 29, 30, 32, 33, 34, 36) # sig numeric vars (16)
+
+# Function to calculate sensitivity, specificity for all combinations of a given number of variables
+calculate_combinations <- function(modelIdx, max_vars = 15, iters = 10, splitPerc = 0.7) {
+  # Initialize an empty list to store results
+  results_list <- list()
+  
+  # Initialize a variable to keep track of the maximum specificity reached
+  # max_specificity_so_far <- 0
+  
+  # Initialize a variable to store the maximum mean specificity from previous iterations
+  # max_mean_specificity_previous <- 0
+
+  # Loop over different number of variables
+  for (num_vars in seq(8, max_vars)) {
+    cat("Number of variables:", num_vars, "\n")
+    start_time <- Sys.time()
+    
+    # Generate all combinations of variables
+    index_combinations <- combinat::combn(modelIdx, num_vars)
+    
+    # Initialize an empty list to store results for this iteration
+    temp_results_list <- list()
+    
+    # Loop through each combination of variables
+    for (i in 1:ncol(index_combinations)) {
+      index_set <- index_combinations[, i]
+      
+      # Create holders for the sensitivity, specificity for each iteration
+      masterSens <- numeric(iters)
+      masterSpec <- numeric(iters)
+      
+      # Iterate over the specified number of iterations
+      for (j in 1:iters) {
+        set.seed(j)
+        
+        # Sample 70% for training
+        trainIdx <- sample(1:dim(numerical_df)[1], round(splitPerc * dim(numerical_df)[1]))
+        # Select the rows for training
+        AttritionTrn <- numerical_df[trainIdx, ]
+        # Select the remaining rows for testing
+        AttritionTst <- numerical_df[-trainIdx, ]
+        
+        # Temporarily set the current indexes for modeling
+        temp_modelIdx <- index_set
+        
+        # Train the model
+        classifications <- knn(AttritionTrn[, temp_modelIdx], AttritionTst[, temp_modelIdx], AttritionTrn$Attrition, prob = TRUE, k = 15)
+
+        # Predict using the model
+        # preds <- predict(modelNB, AttritionTst[, temp_modelIdx])
+
+        # Confusion matrix
+        CM <- confusionMatrix(table(classifications, AttritionTst$Attrition))
+        
+        # Store sensitivity, specificity
+        masterSens[j] <- CM$byClass["Sensitivity"]
+        masterSpec[j] <- CM$byClass["Specificity"]
+      }
+      
+      # Average sensitivity, specificity
+      avg_sensitivity <- mean(masterSens)
+      avg_specificity <- mean(masterSpec)
+      
+      # Store the results including the combination of variables
+      temp_results_list[[i]] <- list(variables = index_set, Sensitivity = avg_sensitivity, Specificity = avg_specificity)
+    }
+    
+    end_time <- Sys.time()
+    time_taken <- end_time - start_time
+    cat("Time taken:", time_taken, "\n")
+    
+    # Store the results for this iteration
+    results_list[[num_vars]] <- temp_results_list
+    
+    # Get the maximum mean specificity for this number of variables
+    max_mean_specificity_current <- max(sapply(temp_results_list, function(x) x$Specificity))
+    
+    # Check if the maximum mean specificity for the current number of variables is less than the previous maximum
+    # if (max_mean_specificity_current < max_mean_specificity_previous) {
+    #   cat("Maximum specificity reached for", num_vars, "variables is less than previous maximum. Stopping further iterations.\n")
+    #   break
+    # }
+    
+    # Update the maximum mean specificity from previous iterations
+    # max_mean_specificity_previous <- max_mean_specificity_current
+  }
+  
+  return(results_list)
+}
+
+# Define the list of indexes to loop through
+modelIdx <- c(2,4,7,12,15,16,18,19,20,24,29,30,32,33,34,36) #significant features
+
+# Define the maximum number of variables
+max_vars <- 15
+
+# Call the function to calculate combinations
+results <- calculate_combinations(modelIdx, max_vars)
+
+# Determine the maximum expected number of combinations
+max_combinations <- (max_vars - 8) * 10  # Assuming a maximum of 10 combinations per number of variables
+
+# Preallocate the output data frame with maximum expected number of rows
+output_df <- data.frame(Number_of_Variables = integer(max_combinations),
+                        Variable_Indexes = character(max_combinations),
+                        Mean_Sensitivity = numeric(max_combinations),
+                        Mean_Specificity = numeric(max_combinations),
+                        Sum_of_Sensitivity_and_Specificity = numeric(max_combinations),
+                        stringsAsFactors = FALSE)
+
+# Loop over different number of variables
+for (num_vars in seq(8, max_vars)) {
+  cat("\nTop 10 combinations with the highest specificity for", num_vars, "variables:\n")
+
+  sorted_indices <- order(sapply(results[[num_vars]], function(x) x$Specificity), decreasing = TRUE)
+  for (i in 1:min(10, length(sorted_indices))) {
+    index <- sorted_indices[i]
+    # cat("Combination", i, ": Variables =", results[[num_vars]][[index]]$variables, ", Specificity =", results[[num_vars]][[index]]$Specificity, "\n")
+
+    # Assign the results to the preallocated rows in the output data frame
+    row_index <- (num_vars - 8) * 10 + i  # Calculate the row index
+    output_df$Number_of_Variables[row_index] <- num_vars
+    output_df$Variable_Indexes[row_index] <- paste(results[[num_vars]][[index]]$variables, collapse = ", ")
+    output_df$Mean_Sensitivity[row_index] <- results[[num_vars]][[index]]$Sensitivity
+    output_df$Mean_Specificity[row_index] <- results[[num_vars]][[index]]$Specificity
+    output_df$Sum_of_Sensitivity_and_Specificity[row_index] <- results[[num_vars]][[index]]$Sensitivity + results[[num_vars]][[index]]$Specificity
+  }
+}
+
+# Print the final output data frame
+print(output_df)
+
+```
+<br>
+From a pool of these variables, `Age`, `BusinessTravel`, `DistanceFromHome`, `EnvironmentSatisfaction`, `JobInvolvement`, `JobLevel`, `JobRole`, `JobSatisfaction`, `MaritalStatus`, `MonthlyIncome`, `OverTime`, `StockOptionLevel`, `TotalWorkingYears`, `WorkLifeBalance`, `YearsAtCompany`, `YearsInCurrentRole`, `YearsWithCurrManager`, I try to predict which combinations might yield the highest sensitivity and specificity. Overall, it doesn't look very promising, perhaps because I didn't adjust the threshold or tune the parameter k. I choose generally the best performing set of increasing numbers of variables to use in the next block of code, where I will tune the parameters.  
+<br>
+<br>
+**Using several of the what seem likely to be the best combinations of explanatory variables, I tune several parameters in the k-NN model. I try to adjust and tune the thresholding, because the dataset is unbalanced with only 16% "Yes" in the Attrition variable. I also tune the number of neighbors, k. I evaluate all combinations of variables and tuning parameters with both external and internal validation. There is probably a better, clearer way to tune k.**
+<br>
+```{r KNNtuning, comment = ""}
+# I comment out some parameters to make a demo version of this code, so that it doesn't take so long to run.
+
+# define parameters
+modelIdx_list = list(
+  c(2, 4, 7, 12, 15, 16, 18, 19, 20, 24, 29, 30, 32, 33, 34, 36), # sig numeric vars (16)
+  # c(12,16,19,24,29,33,34,36), #8var
+  # c(16,18,20,24,29,33,34,36), #8var
+  # c(2,12,16,19,24,29,33,34,36), #9var
+  # c(2,12,16,19,24,29,30,33,34,36), #10var
+  # c(2,12,16,19,20,24,29,30,33,34,36), #11var
+  # c(2,7,16,18,19,20,24,29,30,33,34,36), #12var
+  # c(2,7,12,16,18,19,20,24,29,30,33,34,36), #13var
+  c(2,7,12,15,16,18,19,20,24,29,30,33,34,36), #14var
+  # c(2,7,12,15,16,18,19,20,24,29,30,32,33,34,36), #15var
+  # c(12,15,16,19,20,24,29,30,32,33,34,36),     # NB Combination 2 (my hand-picked variables) minus job role
+  c(4,7,12,15,16,19,20,24,29,30,32,33,34,36)    # NB Combination 4 (the *best*) minus job role
+  # c(2, 7, 20, 22, 25, 30, 31, 33, 34, 35, 36) # all numeric variables
+)
+
+# actual set of parameters used
+# thresholds = seq(0.1, 0.6, 0.02) #classifier thresholds to try for "Yes" based on ~0.16 proportion yes to no
+# numKs = seq(1, 49, 2) #odd Ks to try
+# iters = 100  #train/test split iterations
+# splitPerc = 0.7  #percentage of data for training
+
+# demo set
+thresholds = seq(0.1, 0.5, 0.05) #classifier thresholds to try for "Yes" based on ~0.16 proportion yes to no
+numKs = seq(3, 49, 2) #odd Ks to try
+iters = 10  #train/test split iterations
+splitPerc = 0.7  #percentage of data for training
+
+# for debugging
+# modelIdx = c(2, 4, 7, 12, 15, 16, 18, 19, 20, 24, 29, 30, 32, 33, 34, 36)
+# threshold = 0.5
+# k = 11
+# i = 1
+
+# initialize a list to store results
+results_list = list()
+
+# time the loop 
+loop_start = Sys.time()
+cat("Start time:", loop_start, "\n")
+
+# loop through modelIdx combinations
+for (modelIdx in modelIdx_list) {
+  
+  # loop through the thresholds
+  for (threshold in thresholds) {
+    
+    # loop through the Ks
+    for (k in numKs) {
+      
+      # time the K loop
+      k_start = Sys.time()
+      
+      # make holders for the stats from each iteration for this modelIdx, threshold and K
+      iteration_stats = matrix(nrow = iters, ncol = 5)
+      colnames(iteration_stats) = c("Seed", "Threshold", "K", "Sensitivity", "Specificity")
+      
+      # counter for row index in iteration_stats
+      row_counter = 1
+      
+      # external cross-validation loop
+      for (i in 1:iters) {
+
+        set.seed(i)
+
+        # generate the test train split
+        trainIdx = sample(1:nrow(numerical_df), round(splitPerc * nrow(numerical_df)))
+        AttritionTrn = numerical_df[trainIdx, ]
+        AttritionTst = numerical_df[-trainIdx, ]
+
+        # train kNN model with current k and feature (modelIdx) set
+        classifications = knn(AttritionTrn[, modelIdx], AttritionTst[, modelIdx], AttritionTrn$Attrition, prob = T, k = k)
+        # create a table of predicted vs actual values for assessing classification accuracy
+        #table(classifications, AttritionTst$Attrition)
+   
+        # display the classifications and their attributes; useful for debugging and understanding model output
+        classifications
+        attributes(classifications)
+        
+        # compute probabilities specifically for the "YES" class, adjusting based on predicted labels
+        probs = ifelse(classifications == "YES", attributes(classifications)$prob, 1 - attributes(classifications)$prob)
+
+        # apply the new threshold to reclassify observations
+        NewClass = ifelse(probs >= threshold, "Yes", "No")
+
+        # this didn't work if all the predictions were No because the Yes row was missing 
+        # tabulate the new classifications against actual values
+        # table(NewClass, AttritionTst$Attrition)
+        # calculate the confusion matrix
+        # don't need to relevel the confusion matrix because I am looking at sensitivity + specificity
+        # CM_no = confusionMatrix(table(relevel(as.factor(NewClass), ref = "No"), AttritionTst$Attrition), mode = "everything")
+        
+        # create a table with rows for both "Yes" and "No" classes (in the event there are zero "Yes"s)
+        table_predicted_actual = matrix(0, nrow = 2, ncol = 2, dimnames = list(c("No", "Yes"), c("No", "Yes")))
+        
+        # populate the counts based on the predictions and actual classes
+        table_predicted_actual["No", "No"] = sum(NewClass == "No" & AttritionTst$Attrition == "No")
+        table_predicted_actual["No", "Yes"] = sum(NewClass == "No" & AttritionTst$Attrition == "Yes")
+        table_predicted_actual["Yes", "No"] = sum(NewClass == "Yes" & AttritionTst$Attrition == "No")
+        table_predicted_actual["Yes", "Yes"] = sum(NewClass == "Yes" & AttritionTst$Attrition == "Yes")
+
+        # calculate the confusion matrix for this iteration
+        CM_no = confusionMatrix(table_predicted_actual, mode = "everything")
+        
+        # get sensitivity and specificity for "No" class
+        sens_no = CM_no[4]$byClass["Sensitivity"] # because reference (positive class) is set to no
+        spec_no = CM_no[4]$byClass["Specificity"]
+
+        # store results for that iteration
+        iteration_stats[row_counter, ] = c(i, threshold, k, sens_no, spec_no)
+        row_counter = row_counter + 1
+
+      } # complete external cross-validation loop
+      
+      # initialize variables to store predictions and actual values to calculate confusion matrix after all LOO
+      all_predictions = c()
+      all_actual = c()
+      
+      # internal cross-validation (Leave-One-Out Cross-Validation)
+      classifications = knn.cv(numerical_df[, modelIdx], numerical_df$Attrition,
+                         prob = TRUE, k = k)
+      # create a table of predicted vs actual values for assessing classification accuracy
+      #table(classifications, AttritionTst$Attrition)
+   
+      # display the classifications and their attributes; useful for debugging and understanding model output
+      classifications
+      attributes(classifications)
+        
+      # compute probabilities specifically for the "YES" class, adjusting based on predicted labels
+      probs = ifelse(classifications == "YES", attributes(classifications)$prob, 1 - attributes(classifications)$prob)
+
+      # apply the new threshold to reclassify observations
+      NewClass = ifelse(probs >= threshold, "Yes", "No")
+      
+      # tabulate the new classifications against actual values
+      # table(NewClass, AttritionTst$Attrition)
+      # calculate the confusion matrix
+      # don't need to relevel the confusion matrix because I am looking about sensitivity + specificity
+      # CM_no = confusionMatrix(table(relevel(as.factor(NewClass), ref = "No"), cs2_conv$Attrition), mode = "everything")
+      
+      # create a table with rows for both "Yes" and "No" classes (in the event there are zero "Yes"s)
+      table_predicted_actual = matrix(0, nrow = 2, ncol = 2, dimnames = list(c("No", "Yes"), c("No", "Yes")))
+        
+      # populate the counts based on the predictions and actual classes
+      table_predicted_actual["No", "No"] = sum(NewClass == "No" & cs2_conv$Attrition == "No")
+      table_predicted_actual["No", "Yes"] = sum(NewClass == "No" & cs2_conv$Attrition == "Yes")
+      table_predicted_actual["Yes", "No"] = sum(NewClass == "Yes" & cs2_conv$Attrition == "No")
+      table_predicted_actual["Yes", "Yes"] = sum(NewClass == "Yes" & cs2_conv$Attrition == "Yes")
+        
+      # calculate the confusion matrix for this iteration
+      CM_no = confusionMatrix(table_predicted_actual, mode = "everything")
+        
+      # get sensitivity and specificity for "No" class
+      sens_icv = CM_no[4]$byClass["Sensitivity"] # because reference (positive class) is set to no
+      spec_icv = CM_no[4]$byClass["Specificity"]
+
+      # calculate mean sensitivity and specificity over ECV and ICV for this combination of modelIdx, threshold and k
+      # not sure if I should even average these??
+      avg_sens = mean(c(mean(iteration_stats[, "Sensitivity"]), sens_icv))
+      avg_spec = mean(c(mean(iteration_stats[, "Specificity"]), spec_icv))
+      
+      # store results for this combination of modelIdx, threshold and K
+      results_list = c(results_list, list(
+        data.frame(
+          ModelIdx = toString(modelIdx),
+          Threshold = threshold,
+          K = k,
+          AvgSensitivity = avg_sens,
+          AvgSpecificity = avg_spec,
+          AvgSum = avg_sens + avg_spec
+        )
+      ))
+
+        # time the k loop
+        k_end = Sys.time()
+        time_taken_thresh = difftime(k_end, k_start, units = "secs")
+        # cat("K Loop Time:", time_taken_thresh, "secs \n")
+        # cat("ModelIdx:", toString(modelIdx), "- Threshold:", threshold, "- K:", k, "\n")
+      
+    } # complete k loop
+
+  } # complete threshold loop
+  
+  # print progress report
+  progress_time = Sys.time()
+  progress = difftime(progress_time, loop_start, units = "mins")
+  cat("Total Elapsed Time:", progress, "mins \n")
+  
+} # complete modelIdx loop
+
+# loop time
+# loop_end = Sys.time()
+# time_taken_loop = difftime(loop_end, loop_start, units = "mins")
+# cat("Total Loop Time:", time_taken_loop, "mins \n")
+
+# convert results_list to a data frame
+results_df = do.call(rbind, results_list)
+
+# plot the optimal k (though not particularly helpful or needed with the other tuning)
+# aggregate results by K
+results_agg = results_df %>%
+  group_by(K) %>%
+  dplyr::summarize(Mean_Sensitivity = mean(AvgSensitivity),
+            Mean_Specificity = mean(AvgSpecificity))
+# plot the average sensitivity and specificity for each K
+ggplot(results_agg, aes(x = K)) +
+  geom_line(aes(y = Mean_Sensitivity, color = "Mean Sensitivity")) +
+  geom_line(aes(y = Mean_Specificity, color = "Mean Specificity")) +
+  labs(title = "Mean sensitivity and specificity for different values of K",
+       x = "K parameter", y = "Metric", color = "Metric") +
+  scale_color_manual(values = c("Mean Sensitivity" = "darkgreen", "Mean Specificity" = "darkblue")) +
+  theme_bw()
+
+# output top 10 combinations for each ModelIdx
+top_10_combos = results_df %>%
+  arrange(ModelIdx, desc(AvgSum), desc(AvgSpecificity), desc(AvgSensitivity)) %>%
+  group_by(ModelIdx) %>%
+  top_n(10, wt = AvgSum)
+kable(top_10_combos, caption = "demo top 10 sensitivity + specificity tuned knn parameters") %>% kable_styling(full_width = FALSE, position = "left")
+
+```
+<br>
+Based on this parameter tuning, the highest sum of sensitivity and specificity scores my k-NN model achieves is 148.78 (Sensitivity of 75.16% and Specificity of 73.62%). The optimization was achieved with `ModelIdx = c(4, 7, 12, 15, 16, 19, 20, 24, 29, 30, 32, 33, 34, 36)`, which are the indexes of the columns in `cs2` (and `numerical_df`) and `k = 41` and `threshold (of "Yes" >=) = 0.14`. This is the same list of variables that achieve the best performance (148.79) in the Naive Bayes model, minus `JobRole`. Sensitivity and specificity are more balanced in this model, probably because the threshold here is quite low, 0.14 versus 0.46 in the Naive Bayes model. I think I will use the Naive Bayes model for the final predictions because it has a tiny bit higher sum of sensitivity and specificity (only 0.01), without using what seems like a very low threshold 0.14, when the percentage of Attrition in the actual data set is ~16%. I would prefer to use the simpler model. While the Naive Bayes model does use one more variable, I think the work of pre-processing variables for k-NN offsets the extra variable.  
+<br>
+<br>
+
+### Objective 4: Build a R Shiny app to visualize some of the relationships.
+<br>
+**This R Shiny app displays the distributions of monthly income by attrition group in a boxplot and histograms. A user can select individual or combinations of job roles and also a salary range. The app will interactively update with the distributions for the user selections and will display the percent of selected employees in each attrition group.**  
+<br>
+R Shiny Employee Attrition and Income App is here: https://kdhenderson.shinyapps.io/Employee_Attrition_and_Income/.
+<br>
+<br>
+
+### Objective 5: Predict the attrition on the competition set.  
+<br>
+**I import the unlabeled competition data set from the cloud as `competition`. I convert the numerical ranked variables to factors. So that my column indexes are the same as those in the primary data set, I add an `Attrition` column. I train a Naive Bayes model on the entire labeled primary data set using the tuned alpha parameter. Then I adjust the classifications with the tuned threshold.**
+<br>
+```{r predictAttritionCompetitionSet, comment = ""}
+# make predictions with Naive Bayes model
+
+# variables used: `BusinessTravel`, `DistanceFromHome`, `EnvironmentSatisfaction`, `JobInvolvement`, `JobLevel`, `JobRole`, `MaritalStatus`, `MonthlyIncome`, `OverTime`, `StockOptionLevel`, `TotalWorkingYears`, `WorkLifeBalance`, `YearsAtCompany`, `YearsInCurrentRole`, `YearsWithCurrManager`
+
+# parameters
+# train_dataframe = cs2_conv
+# adjust index numbers based on missing Attrition column #3 or add column to competition set
+ModelIdx = c(4, 7, 12, 15, 16, 17, 19, 20, 24, 29, 30, 32, 33, 34, 36)
+alpha = 0.7
+threshold = 0.46 # "Yes" >=
+
+# import data: CaseStudy2CompSet No Attrition.csv from AWS S3 msdsds6306 bucket
+
+url = "https://msdsds6306.s3.us-east-2.amazonaws.com/CaseStudy2CompSet+No+Attrition.csv"
+# encoded_url = URLencode(url) # need to encode the spaces as %20 (or do it manually)
+competition = read.table(textConnection(getURL(url)), sep = ",", header = TRUE, stringsAsFactors = TRUE)
+
+# save a copy of the competition unlabeled data
+# write.csv(competition, file = "data/CaseStudy2CompSet No Attrition.csv", row.names = FALSE)
+
+# get a sense of the data
+str(competition)
+summary(competition)
+
+# convert numerical ranked variables to factors
+numVars_to_fact = c("Education", "EnvironmentSatisfaction",
+                    "JobInvolvement", "JobLevel", "JobSatisfaction",
+                    "PerformanceRating", "RelationshipSatisfaction",
+                    "StockOptionLevel", "WorkLifeBalance")
+competition = competition %>%
+  mutate(across(all_of(numVars_to_fact), as.factor))
+# check the conversion
+# str(competition)
+
+# add the Attrition column between Age and BusinessTravel
+competition = competition %>%
+  mutate(Attrition = NA, .after = "Age")
+# str(competition)
+
+# train the Naive Bayes model
+fullsetNBmodel = naiveBayes(cs2_conv[, modelIdx], cs2_conv$Attrition, laplace = alpha)
+
+# predict the labels on the competition set
+preds = predict(fullsetNBmodel, competition[, modelIdx], type = "raw") # raw returns the probabilities
+
+# get the Yes probabilities to adjust threshold
+attrition_probs = preds[, "Yes"]
+
+# classify with new threshold
+predictions = ifelse(attrition_probs >= threshold, "Yes", "No")
+
+# add the labels to the Attrition column
+competition = competition %>% mutate(Attrition = factor(predictions))
+# str(competition)
+
+# get the proportion of attrition for curiousity
+summary(competition$Attrition)
+NoAttProb = summary(competition$Attrition)["No"] / sum(summary(competition$Attrition))
+NoAttProb
+AttProb = summary(competition$Attrition)["Yes"] / sum(summary(competition$Attrition))
+AttProb
+
+# make dataframe with just competition set ordered IDs and labels
+competitionLabels = competition %>% select(ID, Attrition)
+str(competitionLabels)
+
+# save to file
+# write.csv(competitionLabels, file = "data/Case2PredictionsHenderson Attrition.csv", row.names = FALSE)
+
+```
+<br>
+<br>
+
+### Objective 6: Create a linear regression model to predict monthly salaries.  
+(with < $3000 RMSE for training and validation set)  
+<br>
+**To create a new dataframe `cs2_regres`, I transform the original data set by reordering and converting factor variables to integers. Based on the EDA scatter plots, I also derive some quadratic variables.**
+<br>
+```{r linearReg_model, comment = ""}
+
+# starting with the original dataset `cs2` since the ordinal categorical variables are in an integer class
+# there are a few other variables that I could transform into ranked variables, like business travel
+# not sure it is valid to do it for marital status or overtime
+
+# make a copy of the original dataset
+numerical_df = cs2
+
+# check the data
+head(numerical_df$BusinessTravel)
+
+# reorder factor levels
+numerical_df$BusinessTravel = factor(numerical_df$BusinessTravel, levels = c("Non-Travel", "Travel_Rarely", "Travel_Frequently"), labels = c("Non-Travel", "Travel_Rarely", "Travel_Frequently"))
+
+# rename the levels to numbers
+levels(numerical_df$BusinessTravel) = c(1:3)
+
+# convert factor to integer
+numerical_df$BusinessTravel = as.integer(numerical_df$BusinessTravel)
+
+# check the conversion
+head(numerical_df$BusinessTravel)
+
+# repeat for marital status and overtime and attrition :/
+head(numerical_df$MaritalStatus)
+numerical_df$MaritalStatus = factor(numerical_df$MaritalStatus, levels = c("Single", "Married", "Divorced"), labels = c("Single", "Married", "Divorced"))
+levels(numerical_df$MaritalStatus) = c(1:3)
+numerical_df$MaritalStatus = as.integer(numerical_df$MaritalStatus)
+head(numerical_df$MaritalStatus)
+
+head(numerical_df$OverTime)
+numerical_df$OverTime = factor(numerical_df$OverTime, levels = c("Yes", "No"), labels = c("Yes", "No"))
+levels(numerical_df$OverTime) = c(1:2)
+numerical_df$OverTime = as.integer(numerical_df$OverTime)
+head(numerical_df$OverTime)
+
+head(numerical_df$Attrition)
+numerical_df$Attrition = factor(numerical_df$Attrition, levels = c("Yes", "No"), labels = c("Yes", "No"))
+levels(numerical_df$Attrition) = c(1:2)
+numerical_df$Attrition = as.integer(numerical_df$Attrition)
+head(numerical_df$Attrition)
+
+# make a new DF, transform x variable (squaring term) and add it as a new column
+cs2_regres = numerical_df %>%
+  mutate(
+    YearsInCurrentRole2 = YearsInCurrentRole^2,
+    YearsWithCurrManager2 = YearsWithCurrManager^2)
+
+#indexes from cs2_regres dataframe
+ModelIdx = c(2,3,4,5,7,8,12,14,15,16,18,19,21,22,24,25,26,27,29,30,31,32,33,34,35,36,37,38)
+
+```
+<br>
+<br>
+**To find the variables that produce a model with the lowest RMSE, I start with an empty model formula. In a loop, I add each of the variables in the `cs2_regres` dataframe independently to build a regression model. I evaluate each model with leave-one-out cross validation. I store each result in a dataframe, sorted by lowest RMSE. Using these values as a guide, I manually choose the variable which performs best. I add it as an explanatory variable to the model and repeat the process with the remaining variables until I can no longer achieve a lower RMSE with additional variables.**
+<br>
+```{r regression_variableOptimization}
+# unused indexes from cs2_regres dataframe 
+ModelIdx = c(2,3,4,5,8,14,18,19,21,22,24,25,26,27,29,31,32,33,34,35,37)
+  
+# initialize an empty dataframe to store results
+results = data.frame(Index = numeric(length(ModelIdx)), Variable = character(length(ModelIdx)), RMSE = numeric(length(ModelIdx)))
+
+# get number of rows in data frame
+n = nrow(cs2_regres)
+
+# loop through each explanatory variable separately
+for (i in seq_along(ModelIdx)) {
+  
+  # create formula with the current explanatory variable 
+  model_formula = as.formula(paste("MonthlyIncome ~ JobLevel + TotalWorkingYears + YearsWithCurrManager + YearsWithCurrManager2 + DistanceFromHome + JobInvolvement + EnvironmentSatisfaction + ", names(cs2_regres)[ModelIdx[i]]))
+  # indexes of variables used in model c(16,30,36,7,15,38,12)
+
+  # initialize vector to store squared error from each leave-one-out loop
+  cv_error_model = numeric(n)
+  
+  # loop through setting each row as test set for internal n-fold CV
+  for (j in 1:n) {
+    # leave out the j-th observation
+    test_row = cs2_regres[j, ]
+    
+    # use the remaining data for training       
+    train_data = cs2_regres[-j, ]
+    
+    # fit the model with train_data
+    model = lm(model_formula, data = train_data)
+    
+    # predict on the left-out observation
+    pred = predict(model, newdata = test_row)
+    
+    # calculate the squared error
+    cv_error_model[j] = (test_row$MonthlyIncome - pred)^2
+  }
+  
+  # calculate the root mean squared error (RMSE) for the current model
+  RMSE = sqrt(mean(cv_error_model))
+  
+  # store the variable index, name, and RMSE in the results dataframe
+  results[i, "Index"] = ModelIdx[i]
+  results[i, "Variable"] = names(cs2_regres)[ModelIdx[i]]
+  results[i, "RMSE"] = RMSE
+}
+
+# sort results by RMSE in ascending order
+results = results[order(results$RMSE), ]
+
+# print the sorted table
+kable(results, caption = "demo of resulting RSME for each 1 added variable") %>% kable_styling(full_width = FALSE, position = "left")
+
+```
+<br>
+Measured with internal n-fold cross validation, I achieve the lowest RMSE of 1375.36 with the following explanatory variables `JobLevel`, `TotalWorkingYears`, `YearsWithCurrManager`, `YearsWithCurrManager2`, `DistanceFromHome`, `JobInvolvement`, `EnvironmentSatisfaction`.  
+<br>
+<br>
+**To measure separate RMSEs for a training and a validation set, I use external cross validation for a linear regression model of `MonthlyIncome` using the variables above.**
+<br>
+```{r calcRMSE, comment = ""}
+
+# model formula from variable indexes (16,30,36,7,15,38,12)
+model_formula = as.formula("MonthlyIncome ~ JobLevel + TotalWorkingYears + YearsWithCurrManager + YearsWithCurrManager2 + DistanceFromHome + JobInvolvement + EnvironmentSatisfaction")
+
+# number of train/test splits
+iters = 100
+
+# split percentage
+split_perc = 0.7
+
+# initialize vector to store squared error from each train/test split loop for training and validation sets
+cv_error_train = numeric(iters)
+cv_error_test = numeric(iters)
+  
+# external cross-validation loop
+for (i in 1:iters) {
+  
+  set.seed(i)
+
+  # generate the test train split
+  trainIdx = sample(1:nrow(cs2_regres), round(splitPerc * nrow(cs2_regres)))
+  IncomeTrn = cs2_regres[trainIdx, ]
+  IncomeTst = cs2_regres[-trainIdx, ]
+    
+  # fit the model with train_data
+  model = lm(model_formula, data = IncomeTrn)
+    
+  # predict on the training set (same data used to make model)
+  predTrn = predict(model, newdata = IncomeTrn)
+  
+  # calculate the mean squared error of training pred
+  cv_error_train[i] = mean((IncomeTrn$MonthlyIncome - predTrn)^2)
+  
+  # predict on the training set (same data used to make model)
+  predTst = predict(model, newdata = IncomeTst)
+    
+  # calculate the mean squared error of training pred
+  cv_error_test[i] = mean((IncomeTst$MonthlyIncome - predTst)^2)
+}
+  
+# calculate the root mean squared error (RMSE) for the training set
+RMSE_trn = sqrt(mean(cv_error_train)) # root of avg of error from each iteration 
+  
+# calculate the root mean squared error (RMSE) for the validation set
+RMSE_tst = sqrt(mean(cv_error_test))
+  
+# print the results
+cat("\nRMSE of training set: ", RMSE_trn, "\n")
+cat("\nRMSE of validation set: ", RMSE_tst, "\n")
+
+```
+<br>
+For my linear regression model, the RMSE of my training set and validation sets are 1357.37 and 1381.74, respectively. To achieve this, I used these variables, `JobLevel`, `TotalWorkingYears`, `YearsWithCurrManager`, `YearsWithCurrManager2`, `DistanceFromHome`, `JobInvolvement`, `EnvironmentSatisfaction`. This list includes `YearsWithCurrManager2`, which is a variable I derived from squaring `YearsWithCurrManager`.  
+<br>
+<br>
+**I import the unlabeled competition data set from the cloud as `competition`. I create two new variables by squaring existing variables. So that my column indexes are the same as those in the primary data set, I add an `MonthlyIncome` column. I train a Linear Regression model using the optimized variables and all the observations in the labeled primary data set.**
+<br>
+```{r predictIncomeCompetitionSet, comment = ""}
+# make predictions with linear regression model
+
+# variables used: `JobLevel`, `TotalWorkingYears`, `YearsWithCurrManager`, `YearsWithCurrManager2`, `DistanceFromHome`, `JobInvolvement`, `EnvironmentSatisfaction`
+
+# parameters
+# train_dataframe = cs2_regres
+# adjust index numbers based on missing MonthlyIncome column or add column to competition set
+# regresIdx = c(16,30,36,7,15,38,12)
+
+
+# import data: CaseStudy2CompSet No Salary.csv from AWS S3 msdsds6306 bucket
+
+# first column header is `ï..ID` instead of `ID` which I guess is a UTF-8 encoding issue 
+# url = "https://msdsds6306.s3.us-east-2.amazonaws.com/CaseStudy2CompSet+No+Salary.csv"
+# competition = read.table(textConnection(getURL(url)), sep = ",", header = TRUE, stringsAsFactors = TRUE)
+
+# so I use read.csv and specify encoding = "UTF-8" and it imports correctly.
+url = "https://msdsds6306.s3.us-east-2.amazonaws.com/CaseStudy2CompSet+No+Salary.csv"
+competition = read.csv(url, header = TRUE, stringsAsFactors = TRUE, encoding = "UTF-8")
+
+# save a copy of the competition unlabeled data
+# write.csv(competition, file = "data/CaseStudy2CompSet No Salary.csv", row.names = FALSE)
+
+# get a sense of the data
+# str(competition)
+# summary(competition)
+
+# create squared variables, both to keep the indexes consistent
+competition = competition %>%
+  mutate(
+    YearsInCurrentRole2 = YearsInCurrentRole^2,
+    YearsWithCurrManager2 = YearsWithCurrManager^2)
+# check the conversion
+# str(competition)
+
+# add the MonthlyIncome column between MaritalStatus and MonthlyRate 
+competition = competition %>%
+  mutate(MonthlyIncome = NA, .after = "MaritalStatus")
+# str(competition)
+
+# train the linear regression model on the full `cs2_regres` data set
+fullset_LM_model = lm(model_formula, data = cs2_regres)
+
+# predict the labels on the competition set
+preds = predict(fullset_LM_model, competition)
+
+# add the labels to the MonthlyIncome column
+competition = competition %>% mutate(MonthlyIncome = as.integer(preds))
+# str(competition)
+
+# for curiousity get the summary of MonthlyIncome from both datasets
+summary(cs2_regres$MonthlyIncome)
+summary(competition$MonthlyIncome)
+
+# make dataframe with just competition set ordered IDs and labels
+competitionLabels = competition %>% select(ID, MonthlyIncome)
+# str(competitionLabels)
+
+# save to file
+# write.csv(competitionLabels, file = "data/Case2PredictionsHenderson Salary.csv", row.names = FALSE)
+
+```
+<br>
+<br>
+
+### Conclusion
+<br>
+The goal of this analysis is to identify factors that lead to and help predict employee attrition for the CEO and CFO of Frito Lay. This analysis includes 36 unique features from 870 employees. Using a combination of visualizations and statistical techniques, I identify monthly income, job level and over time work as top factors leading to employee attrition. I also document trends across different job roles and provide a tool for interactive visualization of trends in income and attrition rates among these roles. I constructed a model to forecast employee attrition by identifying variables and parameters that yielded the lowest error rates. I also developed an optimized linear regression model for forecasting monthly salaries. With these models, I offer predictions for 300 employees whose attrition outcomes are uncertain and a separate cohort whose salaries are undetermined. Importantly, these data reveal targeted steps that may be taken to mitigate attrition. Specifically, increase monthly income for lower income earners in job level 4, reduce over time work across job levels 1, 2, 3 and 5, prioritize salary hikes and career advancement for personnel in job level 1, where attrition rates are most pronounced. In providing actionable intelligence alongside practical tools, my aim is to empower Frito Lay in cultivating a work environment that promotes the retention and development of high-value talent.
+<br>
+<br>
+
+### Appendix  
+<br>
+**R and package versions used**
+<br>
+```{r session_info, comment = ""}
+
+devtools::session_info()
+
+```
