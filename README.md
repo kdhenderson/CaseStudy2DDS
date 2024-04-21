@@ -78,8 +78,6 @@ Below are the variables and the information I have and/or assumptions I make abo
 
 ### Data transformation
 
-Here is the description of the two primary dataframes used in the analysis.
-
 In the code, the primary dataset (`CaseStudy2-data.csv`) is imported as `cs2`. The numerical variables that are Likert scale responses are converted to factors, creating a new data frame, `cs2_conv`. There are various other data frames created, but this is the primary one used in most of the analysis.
 
 
