@@ -19,6 +19,11 @@ To address the challenge of retaining talented employees, the leadership team of
 View the video presentation of this analysis: https://youtu.be/aY4CYfuHOf4.
 <br>
 <br>
+**R Shiny App**
+<br>
+Try an interactive app of the data: https://kdhenderson.shinyapps.io/Employee_Attrition_and_Income/.
+<br>
+<br>
 **This imports necessary libraries.**
 <br>
 ```{r libraries, results='hide', message=FALSE}
