@@ -7,7 +7,7 @@ To address the challenge of retaining talented employees, the leadership team of
 
 * **Analyst:** Kristin Henderson
 * **Analytics Firm:** DDS Analytics
-* **Stakeholders:** Frito Lay CEO and CFO
+* **Stakeholders:** CEO & CFO, Frito Lay
 
 
 ## Repository structure
@@ -36,7 +36,8 @@ The original dataset, `CaseStudy2-data.csv` was obtained from "https://s3.us-eas
 
 Below are the variables and the information I have and/or assumptions I make about them.
 
-- `CaseStudy2-data.csv`: dataset of employee data with 870 observations of 36 variables.  
+`CaseStudy2-data.csv`: dataset of employee data with 870 observations of 36 variables.  
+
   - `ID`: The row of the observation, a unique number from 1 to 870; numerical/continuous.
   - `Age`: The employee's age (between 18 and 60); numerical/continuous.
   - `Attrition`: Whether the employee left, "No" or "Yes"; categorical with 2 levels.
