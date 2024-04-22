@@ -1,13 +1,13 @@
 # CaseStudy2DDS
 Data Analysis of Employee Attrition - A Case Study
 
-## Purpose
+## Executive Summary
 
-To address the challenge of retaining talented employees, the leadership team of Frito Lay have engaged DDS Analytics to conduct an in-depth analysis aimed at uncovering the underlying factors behind employee turnover within their organization. This study, leveraging data from 870 employees across 36 distinct variables, is designed to yield actionable insights to inform decision-making processes. By employing a combination of visualizations, statistical methodologies, and the creation of predictive models, the objective is to provide strategic guidance and practical tools to enhance future strategies and organizational policies.
+To address the challenge of retaining talented employees, the leadership team of Frito Lay engaged DDS Analytics to conduct an in-depth analysis aimed at uncovering the underlying factors behind employee turnover within their organization. By employing a combination of visualizations and statistical methodologies and leveraging data from 870 employees across 36 distinct variables, this study is designed to yield actionable insights to inform decision-making processes.
 
-* **Analyst:** Kristin Henderson
-* **Analytics Firm:** DDS Analytics
-* **Stakeholders:** CEO & CFO, Frito Lay
+The analysis identifies monthly income, job level, and overtime work as top factors leading to employee attrition. It provides an interactive tool to visualize trends in attrition rates across different salary ranges and job roles. Additionally, predictive models forecast attrition and monthly salaries to aid in the development of proactive strategies for workforce retention.
+
+The data highlight actionable steps to mitigate attrition, including raising incomes for lower earners in job level 4, reducing overtime work across other job levels, and prioritizing salary increases and career advancement for job level 1 employees. In providing actionable intelligence alongside practical tools, the aim is to empower Frito Lay in cultivating a work environment that promotes the retention and development of high-value talent.
 
 
 ## Repository structure
