@@ -17,12 +17,15 @@ The data highlight actionable steps to mitigate attrition, including raising inc
 * `README.md`: Readme file detailing purpose, contents and usage.
 * `Analysis_of_Employee_Attrition_and_Income.Rmd`: Rmarkdown file with introduction, objectives, all code to interact with the data and build the plots, written explanations, links to the video presentation and R Shiny interactive app and conclusion.
 * `Analysis_of_Employee_Attrition_and_Income.html`: HTML file knitted with the above and with embedded data and visualizations.
+* `Analysis_of_Employee_Attrition_and_Income_V2.Rmd`: Rmarkdown file with introduction, objectives, all code to interact with the data and build the plots, written explanations, links to the video presentation and R Shiny interactive app and conclusion. This includes a revised regression model for predicting employee salaries*
+* `Analysis_of_Employee_Attrition_and_Income_V2.html`: HTML file knitted with the above and with embedded data and visualizations.
 * `Presentation_Attrition.ppt`: Powerpoint slides for the analysis with link to seven-minute YouTube video presentation.
 
-### Data directory containing five data files.
+### Data directory containing six data files.
 
 * **`Case2PredictionsHenderson Attrition.csv`**
 * **`Case2PredictionsHenderson Salary.csv`**
+* **`Case2PredictionsHenderson2 Salary.csv`** (predictions using revised model)
 * `CaseStudy2-data.csv`
 * `CaseStudy2CompSet No Attrition.csv`
 * `CaseStudy2CompSet No Salary.csv`
