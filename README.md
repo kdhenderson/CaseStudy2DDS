@@ -1,5 +1,6 @@
-# CaseStudy2DDS
-Data Analysis of Employee Attrition - A Case Study
+# Employee Attrition Analysis
+
+Data analysis of employee attrition and monthly income, completed for SMU's MSDS Doing Data Science course.
 
 ## Executive Summary
 
@@ -10,25 +11,29 @@ The analysis identifies monthly income, job level, and overtime work as top fact
 The data highlight actionable steps to mitigate attrition, including raising incomes for lower earners in job level 4, reducing overtime work across other job levels, and prioritizing salary increases and career advancement for job level 1 employees. In providing actionable intelligence alongside practical tools, the aim is to empower Frito Lay in cultivating a work environment that promotes the retention and development of high-value talent.
 
 
+## Companion materials
+
+* Video presentation (seven minutes): https://youtu.be/aY4CYfuHOf4
+* Interactive R Shiny app: https://kdhenderson.shinyapps.io/Employee_Attrition_and_Income/
+
+
 ## Repository structure
 
 ### Root directory
 
-* `README.md`: Readme file detailing purpose, contents and usage.
-* `Analysis_of_Employee_Attrition_and_Income.Rmd`: Rmarkdown file with introduction, objectives, all code to interact with the data and build the plots, written explanations, links to the video presentation and R Shiny interactive app and conclusion.
-* `Analysis_of_Employee_Attrition_and_Income.html`: HTML file knitted with the above and with embedded data and visualizations.
-* `Analysis_of_Employee_Attrition_and_Income_V2.Rmd`: Rmarkdown file with introduction, objectives, all code to interact with the data and build the plots, written explanations, links to the video presentation and R Shiny interactive app and conclusion. This includes a revised regression model for predicting employee salaries*
-* `Analysis_of_Employee_Attrition_and_Income_V2.html`: HTML file knitted with the above and with embedded data and visualizations.
-* `Presentation_Attrition.ppt`: Powerpoint slides for the analysis with link to seven-minute YouTube video presentation.
+* `README.md`: Readme file detailing purpose, contents, and usage.
+* `EmployeeAttritionAnalysis.Rmd`: R Markdown file with the introduction, objectives, code, written explanations, links to the video presentation and R Shiny app, and conclusion.
+* `EmployeeAttritionAnalysis.html`: HTML file knitted from the above, with embedded data and visualizations.
+* `Presentation_Attrition.pptx`: PowerPoint slides for the analysis, with a link to the seven-minute YouTube video.
 
-### Data directory containing six data files.
+### Data directory (six data files)
 
-* **`Case2PredictionsHenderson Attrition.csv`**
-* **`Case2PredictionsHenderson Salary.csv`**
-* **`Case2PredictionsHenderson2 Salary.csv`** (predictions using revised model)
-* `CaseStudy2-data.csv`
-* `CaseStudy2CompSet No Attrition.csv`
-* `CaseStudy2CompSet No Salary.csv`
+* **`Case2PredictionsHenderson Attrition.csv`** — competition-set attrition predictions
+* **`Case2PredictionsHenderson Salary.csv`** — competition-set salary predictions from the first regression model
+* **`Case2PredictionsHenderson2 Salary.csv`** — competition-set salary predictions from the revised regression model in the current Rmd
+* `CaseStudy2-data.csv` — labeled training data (870 employees, 36 variables)
+* `CaseStudy2CompSet No Attrition.csv` — unlabeled competition set for attrition prediction
+* `CaseStudy2CompSet No Salary.csv` — unlabeled competition set for salary prediction
 
 
 ## Codebook
@@ -86,11 +91,10 @@ In the code, the primary dataset (`CaseStudy2-data.csv`) is imported as `cs2`. T
 
 ### Usage
 
-* Clone this repository
-`git clone https://github.com/kdhenderson/CaseStudy2DDS.git`
-* The files were created with RStudio version 2023.12.1+402. (Machine: MacBook Pro, OS: macOS Monterey 12.7.1)
-* All required libraries are listed and loaded in the Rmarkdown file in one of the first code chunks. If not already installed, run `install.packages("package_name")` substituting the needed package for `package_name`, prior to loading the libraries.
-* R and package versions are provided in the appendix of the Rmd file.
+* Clone this repository: `git clone https://github.com/kdhenderson/EmployeeAttritionAnalysis.git`
+* The files were created with RStudio version 2023.12.1+402 (MacBook Pro, macOS Monterey 12.7.1).
+* All required libraries are listed and loaded in the R Markdown file in one of the first code chunks. If not already installed, run `install.packages("package_name")` for any missing package before loading the libraries.
+* R and package versions are listed in the appendix of the Rmd file.
 
 
 
